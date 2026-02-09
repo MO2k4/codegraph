@@ -6,6 +6,8 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
+import { Worker } from 'worker_threads';
+import * as os from 'os';
 import { Node, UnresolvedReference, Edge } from '../types';
 import { QueryBuilder } from '../db/queries';
 import {
@@ -36,6 +38,10 @@ export class ReferenceResolver {
   private frameworks: FrameworkResolver[] = [];
   private nodeCache: Map<string, Node[]> = new Map();
   private fileCache: Map<string, string | null> = new Map();
+  private nodesByName: Map<string, Node[]> = new Map();
+  private nodesByFile: Map<string, Node[]> = new Map();
+  private nodesById: Map<string, Node> = new Map();
+  private cacheWarmed = false;
 
   constructor(projectRoot: string, queries: QueryBuilder) {
     this.projectRoot = projectRoot;
@@ -57,6 +63,40 @@ export class ReferenceResolver {
   clearCaches(): void {
     this.nodeCache.clear();
     this.fileCache.clear();
+    this.nodesByName.clear();
+    this.nodesByFile.clear();
+    this.nodesById.clear();
+    this.cacheWarmed = false;
+  }
+
+  /**
+   * Warm caches by loading all nodes into memory for fast lookups
+   */
+  warmCaches(): void {
+    if (this.cacheWarmed) return;
+    const allNodes = this.queries.getAllNodes();
+    this.nodesByName.clear();
+    this.nodesByFile.clear();
+    this.nodesById.clear();
+
+    for (const node of allNodes) {
+      // By name (lowercase)
+      const key = node.name.toLowerCase();
+      if (!this.nodesByName.has(key)) {
+        this.nodesByName.set(key, []);
+      }
+      this.nodesByName.get(key)!.push(node);
+
+      // By file
+      if (!this.nodesByFile.has(node.filePath)) {
+        this.nodesByFile.set(node.filePath, []);
+      }
+      this.nodesByFile.get(node.filePath)!.push(node);
+
+      // By id
+      this.nodesById.set(node.id, node);
+    }
+    this.cacheWarmed = true;
   }
 
   /**
@@ -72,6 +112,9 @@ export class ReferenceResolver {
       },
 
       getNodesByName: (name: string) => {
+        if (this.cacheWarmed) {
+          return this.nodesByName.get(name.toLowerCase()) || [];
+        }
         return this.queries.searchNodes(name, { limit: 100 }).map((r) => r.node);
       },
 
@@ -138,6 +181,7 @@ export class ReferenceResolver {
    * Resolve all unresolved references
    */
   resolveAll(unresolvedRefs: UnresolvedReference[]): ResolutionResult {
+    this.warmCaches();
     const resolved: ResolvedRef[] = [];
     const unresolved: UnresolvedRef[] = [];
     const byMethod: Record<string, number> = {};
@@ -183,6 +227,24 @@ export class ReferenceResolver {
     // Skip built-in/external references
     if (this.isBuiltInOrExternal(ref)) {
       return null;
+    }
+
+    // Strategy 0: SCIP-based resolution (highest confidence)
+    if (this.cacheWarmed && ref.filePath) {
+      const scipEdges = this.queries.getOutgoingEdges(ref.fromNodeId)
+        .filter(e => e.provenance === 'scip');
+      const firstScipEdge = scipEdges[0];
+      if (firstScipEdge) {
+        const targetNode = this.nodesById.get(firstScipEdge.target);
+        if (targetNode) {
+          return {
+            original: ref,
+            targetNodeId: targetNode.id,
+            confidence: 1.0,
+            resolvedBy: 'scip',
+          };
+        }
+      }
     }
 
     // Strategy 1: Try framework-specific resolution first
@@ -240,6 +302,126 @@ export class ReferenceResolver {
     }
 
     return result;
+  }
+
+  /**
+   * Resolve references in parallel using worker threads
+   */
+  async resolveAllParallel(
+    unresolvedRefs: UnresolvedReference[],
+    options?: { workerCount?: number; dbPath?: string }
+  ): Promise<ResolutionResult> {
+    const workerCount = Math.min(options?.workerCount ?? os.cpus().length, 4);
+    const dbPath = options?.dbPath;
+
+    if (!dbPath || unresolvedRefs.length < 500 || workerCount <= 1) {
+      return this.resolveAll(unresolvedRefs);
+    }
+
+    // Partition refs by file for locality
+    const partitions = this.partitionByFile(unresolvedRefs, workerCount);
+
+    const workerPath = path.join(__dirname, 'worker.js');
+
+    // Check if worker file exists (may not in dev/test)
+    if (!fs.existsSync(workerPath)) {
+      return this.resolveAll(unresolvedRefs);
+    }
+
+    const workerPromises = partitions.map((partition) => {
+      return new Promise<{ resolved: ResolvedRef[]; stats: ResolutionResult['stats'] }>((resolve, reject) => {
+        const worker = new Worker(workerPath, {
+          workerData: {
+            dbPath,
+            projectRoot: this.projectRoot,
+            refs: partition,
+          },
+        });
+
+        const timeout = setTimeout(() => {
+          worker.terminate();
+          reject(new Error('Worker timed out after 30s'));
+        }, 30000);
+
+        worker.on('message', (msg) => {
+          if (msg.type === 'result') {
+            clearTimeout(timeout);
+            resolve({ resolved: msg.resolved, stats: msg.stats });
+          } else if (msg.type === 'error') {
+            clearTimeout(timeout);
+            reject(new Error(msg.error));
+          }
+        });
+
+        worker.on('error', (err) => {
+          clearTimeout(timeout);
+          reject(err);
+        });
+
+        worker.on('exit', (code) => {
+          if (code !== 0) {
+            clearTimeout(timeout);
+            reject(new Error(`Worker exited with code ${code}`));
+          }
+        });
+      });
+    });
+
+    try {
+      const results = await Promise.all(workerPromises);
+
+      // Merge results
+      const allResolved: ResolvedRef[] = [];
+      const mergedByMethod: Record<string, number> = {};
+      let totalResolved = 0;
+
+      for (const result of results) {
+        allResolved.push(...result.resolved);
+        totalResolved += result.stats.resolved;
+        for (const [method, count] of Object.entries(result.stats.byMethod)) {
+          mergedByMethod[method] = (mergedByMethod[method] || 0) + count;
+        }
+      }
+
+      return {
+        resolved: allResolved,
+        unresolved: [],
+        stats: {
+          total: unresolvedRefs.length,
+          resolved: totalResolved,
+          unresolved: unresolvedRefs.length - totalResolved,
+          byMethod: mergedByMethod,
+        },
+      };
+    } catch (error) {
+      logWarn('Parallel resolution failed, falling back to single-threaded', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return this.resolveAll(unresolvedRefs);
+    }
+  }
+
+  /**
+   * Partition references by file path for worker locality
+   */
+  private partitionByFile(refs: UnresolvedReference[], count: number): UnresolvedReference[][] {
+    const byFile = new Map<string, UnresolvedReference[]>();
+
+    for (const ref of refs) {
+      const key = ref.fromNodeId.split(':')[0] || 'unknown';
+      if (!byFile.has(key)) byFile.set(key, []);
+      byFile.get(key)!.push(ref);
+    }
+
+    const partitions: UnresolvedReference[][] = Array.from({ length: count }, () => []);
+    let idx = 0;
+    for (const group of byFile.values()) {
+      const partition = partitions[idx % count];
+      if (partition) partition.push(...group);
+      idx++;
+    }
+
+    return partitions.filter(p => p.length > 0);
   }
 
   /**
