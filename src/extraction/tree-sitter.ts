@@ -752,6 +752,11 @@ export class TreeSitterExtractor {
         message: `Parse error: ${error instanceof Error ? error.message : String(error)}`,
         severity: 'error',
       });
+    } finally {
+      // Release references so V8 can garbage-collect the native tree-sitter tree.
+      // For large codebases (10K+ files) this prevents hundreds of MB of retained native memory.
+      this.tree = null;
+      this.source = '';
     }
 
     return {

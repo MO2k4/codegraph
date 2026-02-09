@@ -656,10 +656,22 @@ export class QueryBuilder {
   /**
    * Get outgoing edges from a node
    */
-  getOutgoingEdges(sourceId: string, kinds?: EdgeKind[]): Edge[] {
-    if (kinds && kinds.length > 0) {
-      const sql = `SELECT * FROM edges WHERE source = ? AND kind IN (${kinds.map(() => '?').join(',')})`;
-      const rows = this.db.prepare(sql).all(sourceId, ...kinds) as EdgeRow[];
+  getOutgoingEdges(sourceId: string, kinds?: EdgeKind[], provenance?: string): Edge[] {
+    if ((kinds && kinds.length > 0) || provenance) {
+      let sql = 'SELECT * FROM edges WHERE source = ?';
+      const params: (string | number)[] = [sourceId];
+
+      if (kinds && kinds.length > 0) {
+        sql += ` AND kind IN (${kinds.map(() => '?').join(',')})`;
+        params.push(...kinds);
+      }
+
+      if (provenance) {
+        sql += ' AND provenance = ?';
+        params.push(provenance);
+      }
+
+      const rows = this.db.prepare(sql).all(...params) as EdgeRow[];
       return rows.map(rowToEdge);
     }
 

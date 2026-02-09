@@ -257,7 +257,8 @@ export class GraphTraverser {
       const incoming = this.queries.getIncomingEdges(nodeId, kinds);
       edges = [...outgoing, ...incoming];
     }
-    return sortEdgesByEvidence(edges);
+    // Only sort when there are enough edges to matter
+    return edges.length > 1 ? sortEdgesByEvidence(edges) : edges;
   }
 
   /**
@@ -557,23 +558,22 @@ export class GraphTraverser {
       return null;
     }
 
-    // BFS to find shortest path (bounded to prevent resource exhaustion)
+    // Quick check: start === target
+    if (fromId === toId) {
+      return [{ node: fromNode, edge: null }];
+    }
+
+    // BFS to find shortest path using parent-pointer map (O(V) memory)
     const visited = new Set<string>();
-    const queue: Array<{ nodeId: string; path: Array<{ node: Node; edge: Edge | null }> }> = [
-      { nodeId: fromId, path: [{ node: fromNode, edge: null }] },
-    ];
+    // Parent pointers: maps each visited node to its parent node ID and the edge used to reach it
+    const parentMap = new Map<string, { parentId: string; edge: Edge }>();
+    const queue: string[] = [fromId];
+    visited.add(fromId);
+
+    let found = false;
 
     while (queue.length > 0) {
-      const { nodeId, path: currentPath } = queue.shift()!;
-
-      if (nodeId === toId) {
-        return currentPath;
-      }
-
-      if (visited.has(nodeId)) {
-        continue;
-      }
-      visited.add(nodeId);
+      const nodeId = queue.shift()!;
 
       // Bound: stop if we've visited too many nodes
       if (visited.size >= FIND_PATH_MAX_VISITED) {
@@ -590,16 +590,46 @@ export class GraphTraverser {
         if (!visited.has(edge.target)) {
           const nextNode = this.queries.getNodeById(edge.target);
           if (nextNode) {
-            queue.push({
-              nodeId: edge.target,
-              path: [...currentPath, { node: nextNode, edge }],
-            });
+            visited.add(edge.target);
+            parentMap.set(edge.target, { parentId: nodeId, edge });
+
+            if (edge.target === toId) {
+              found = true;
+              break;
+            }
+
+            queue.push(edge.target);
           }
         }
       }
+
+      if (found) {
+        break;
+      }
     }
 
-    return null; // No path found
+    if (!found) {
+      return null; // No path found
+    }
+
+    // Reconstruct path by walking parent pointers backwards from target to source
+    const reversePath: Array<{ node: Node; edge: Edge | null }> = [];
+    let currentId = toId;
+
+    while (currentId !== fromId) {
+      const entry = parentMap.get(currentId)!;
+      const node = this.queries.getNodeById(currentId)!;
+      reversePath.push({ node, edge: entry.edge });
+      currentId = entry.parentId;
+    }
+
+    // Add the start node (no incoming edge)
+    reversePath.push({ node: fromNode, edge: null });
+
+    // Reverse to get path from source to target
+    reversePath.reverse();
+
+    return reversePath;
   }
 
   /**

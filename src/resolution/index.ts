@@ -26,6 +26,26 @@ import { isPathWithinRoot } from '../utils';
 // Re-export types
 export * from './types';
 
+// Module-level Sets for O(1) built-in lookups (instead of arrays with .includes())
+const jsBuiltIns = new Set([
+  'console', 'window', 'document', 'global', 'process',
+  'Promise', 'Array', 'Object', 'String', 'Number', 'Boolean',
+  'Date', 'Math', 'JSON', 'RegExp', 'Error', 'Map', 'Set',
+  'setTimeout', 'setInterval', 'clearTimeout', 'clearInterval',
+  'fetch', 'require', 'module', 'exports', '__dirname', '__filename',
+]);
+
+const reactHooks = new Set([
+  'useState', 'useEffect', 'useContext', 'useReducer', 'useCallback',
+  'useMemo', 'useRef', 'useLayoutEffect', 'useImperativeHandle', 'useDebugValue',
+]);
+
+const pythonBuiltIns = new Set([
+  'print', 'len', 'range', 'str', 'int', 'float', 'list', 'dict', 'set', 'tuple',
+  'open', 'input', 'type', 'isinstance', 'hasattr', 'getattr', 'setattr',
+  'super', 'self', 'cls', 'None', 'True', 'False',
+]);
+
 /**
  * Reference Resolver
  *
@@ -235,8 +255,7 @@ export class ReferenceResolver {
 
     // Strategy 0: SCIP-based resolution (highest confidence)
     if (this.cacheWarmed && ref.filePath) {
-      const scipEdges = this.queries.getOutgoingEdges(ref.fromNodeId)
-        .filter(e => e.provenance === 'scip');
+      const scipEdges = this.queries.getOutgoingEdges(ref.fromNodeId, undefined, 'scip');
       const firstScipEdge = scipEdges[0];
       if (firstScipEdge) {
         const targetNode = this.nodesById.get(firstScipEdge.target);
@@ -442,15 +461,7 @@ export class ReferenceResolver {
     const name = ref.referenceName;
 
     // JavaScript/TypeScript built-ins
-    const jsBuiltIns = [
-      'console', 'window', 'document', 'global', 'process',
-      'Promise', 'Array', 'Object', 'String', 'Number', 'Boolean',
-      'Date', 'Math', 'JSON', 'RegExp', 'Error', 'Map', 'Set',
-      'setTimeout', 'setInterval', 'clearTimeout', 'clearInterval',
-      'fetch', 'require', 'module', 'exports', '__dirname', '__filename',
-    ];
-
-    if (jsBuiltIns.includes(name)) {
+    if (jsBuiltIns.has(name)) {
       return true;
     }
 
@@ -460,19 +471,12 @@ export class ReferenceResolver {
     }
 
     // React hooks from React itself
-    const reactHooks = ['useState', 'useEffect', 'useContext', 'useReducer', 'useCallback', 'useMemo', 'useRef', 'useLayoutEffect', 'useImperativeHandle', 'useDebugValue'];
-    if (reactHooks.includes(name)) {
+    if (reactHooks.has(name)) {
       return true;
     }
 
     // Python built-ins
-    const pythonBuiltIns = [
-      'print', 'len', 'range', 'str', 'int', 'float', 'list', 'dict', 'set', 'tuple',
-      'open', 'input', 'type', 'isinstance', 'hasattr', 'getattr', 'setattr',
-      'super', 'self', 'cls', 'None', 'True', 'False',
-    ];
-
-    if (ref.language === 'python' && pythonBuiltIns.includes(name)) {
+    if (ref.language === 'python' && pythonBuiltIns.has(name)) {
       return true;
     }
 

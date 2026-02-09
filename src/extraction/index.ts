@@ -620,11 +620,40 @@ export class ExtractionOrchestrator {
       }
     }
 
+    // Build a lookup map for tracked files to avoid O(n) find per file
+    const trackedMap = new Map<string, FileRecord>();
+    for (const tf of trackedFiles) {
+      trackedMap.set(tf.path, tf);
+    }
+
     // Find files to add or update
     const filesToIndex: string[] = [];
 
     for (const filePath of currentFiles) {
       const fullPath = path.join(this.rootDir, filePath);
+      const tracked = trackedMap.get(filePath);
+
+      if (!tracked) {
+        // New file - must index
+        filesToIndex.push(filePath);
+        filesAdded++;
+        continue;
+      }
+
+      // Fast pre-check: if mtime and size both match the stored values,
+      // the file is very likely unchanged - skip the expensive read+hash.
+      // This avoids reading thousands of unchanged files during sync.
+      try {
+        const stat = fs.statSync(fullPath);
+        if (stat.mtimeMs === tracked.modifiedAt && stat.size === tracked.size) {
+          continue; // File unchanged based on mtime+size
+        }
+      } catch (error) {
+        logDebug('Skipping unreadable file during sync stat', { filePath, error: String(error) });
+        continue;
+      }
+
+      // mtime or size changed - read and hash to confirm actual content change
       let content: string;
       try {
         content = fs.readFileSync(fullPath, 'utf-8');
@@ -634,14 +663,8 @@ export class ExtractionOrchestrator {
       }
 
       const contentHash = hashContent(content);
-      const tracked = trackedFiles.find((f) => f.path === filePath);
-
-      if (!tracked) {
-        // New file
-        filesToIndex.push(filePath);
-        filesAdded++;
-      } else if (tracked.contentHash !== contentHash) {
-        // Modified file
+      if (tracked.contentHash !== contentHash) {
+        // Content actually changed
         filesToIndex.push(filePath);
         filesModified++;
       }
@@ -690,9 +713,34 @@ export class ExtractionOrchestrator {
       }
     }
 
+    // Build a lookup map for tracked files to avoid O(n) find per file
+    const trackedMap = new Map<string, FileRecord>();
+    for (const tf of trackedFiles) {
+      trackedMap.set(tf.path, tf);
+    }
+
     // Find added and modified files
     for (const filePath of currentFiles) {
       const fullPath = path.join(this.rootDir, filePath);
+      const tracked = trackedMap.get(filePath);
+
+      if (!tracked) {
+        added.push(filePath);
+        continue;
+      }
+
+      // Fast pre-check: if mtime and size both match, skip the expensive read+hash
+      try {
+        const stat = fs.statSync(fullPath);
+        if (stat.mtimeMs === tracked.modifiedAt && stat.size === tracked.size) {
+          continue; // File unchanged based on mtime+size
+        }
+      } catch (error) {
+        logDebug('Skipping unreadable file while detecting changes (stat)', { filePath, error: String(error) });
+        continue;
+      }
+
+      // mtime or size changed - read and hash to confirm actual content change
       let content: string;
       try {
         content = fs.readFileSync(fullPath, 'utf-8');
@@ -702,11 +750,7 @@ export class ExtractionOrchestrator {
       }
 
       const contentHash = hashContent(content);
-      const tracked = trackedFiles.find((f) => f.path === filePath);
-
-      if (!tracked) {
-        added.push(filePath);
-      } else if (tracked.contentHash !== contentHash) {
+      if (tracked.contentHash !== contentHash) {
         modified.push(filePath);
       }
     }

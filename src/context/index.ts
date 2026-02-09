@@ -68,6 +68,7 @@ export class ContextBuilder {
   private queries: QueryBuilder;
   private traverser: GraphTraverser;
   private vectorManager: VectorManager | null;
+  private fileContentCache: Map<string, string> = new Map();
 
   constructor(
     projectRoot: string,
@@ -101,58 +102,63 @@ export class ContextBuilder {
   ): Promise<TaskContext | string> {
     const opts = { ...DEFAULT_BUILD_OPTIONS, ...options };
 
-    // Parse input
-    const query = typeof input === 'string' ? input : `${input.title}${input.description ? `: ${input.description}` : ''}`;
+    try {
+      // Parse input
+      const query = typeof input === 'string' ? input : `${input.title}${input.description ? `: ${input.description}` : ''}`;
 
-    // Find relevant context (semantic search + graph expansion)
-    const subgraph = await this.findRelevantContext(query, {
-      searchLimit: opts.searchLimit,
-      traversalDepth: opts.traversalDepth,
-      maxNodes: opts.maxNodes,
-      minScore: opts.minScore,
-    });
+      // Find relevant context (semantic search + graph expansion)
+      const subgraph = await this.findRelevantContext(query, {
+        searchLimit: opts.searchLimit,
+        traversalDepth: opts.traversalDepth,
+        maxNodes: opts.maxNodes,
+        minScore: opts.minScore,
+      });
 
-    // Get entry points (nodes from semantic search)
-    const entryPoints = this.getEntryPoints(subgraph);
+      // Get entry points (nodes from semantic search)
+      const entryPoints = this.getEntryPoints(subgraph);
 
-    // Extract code blocks for key nodes
-    const codeBlocks = opts.includeCode
-      ? await this.extractCodeBlocks(subgraph, opts.maxCodeBlocks, opts.maxCodeBlockSize)
-      : [];
+      // Extract code blocks for key nodes
+      const codeBlocks = opts.includeCode
+        ? await this.extractCodeBlocks(subgraph, opts.maxCodeBlocks, opts.maxCodeBlockSize)
+        : [];
 
-    // Get related files
-    const relatedFiles = this.getRelatedFiles(subgraph);
+      // Get related files
+      const relatedFiles = this.getRelatedFiles(subgraph);
 
-    // Generate summary
-    const summary = this.generateSummary(query, subgraph, entryPoints);
+      // Generate summary
+      const summary = this.generateSummary(query, subgraph, entryPoints);
 
-    // Calculate stats
-    const stats = {
-      nodeCount: subgraph.nodes.size,
-      edgeCount: subgraph.edges.length,
-      fileCount: relatedFiles.length,
-      codeBlockCount: codeBlocks.length,
-      totalCodeSize: codeBlocks.reduce((sum, block) => sum + block.content.length, 0),
-    };
+      // Calculate stats
+      const stats = {
+        nodeCount: subgraph.nodes.size,
+        edgeCount: subgraph.edges.length,
+        fileCount: relatedFiles.length,
+        codeBlockCount: codeBlocks.length,
+        totalCodeSize: codeBlocks.reduce((sum, block) => sum + block.content.length, 0),
+      };
 
-    const context: TaskContext = {
-      query,
-      subgraph,
-      entryPoints,
-      codeBlocks,
-      relatedFiles,
-      summary,
-      stats,
-    };
+      const context: TaskContext = {
+        query,
+        subgraph,
+        entryPoints,
+        codeBlocks,
+        relatedFiles,
+        summary,
+        stats,
+      };
 
-    // Return formatted output or raw context
-    if (opts.format === 'markdown') {
-      return formatContextAsMarkdown(context);
-    } else if (opts.format === 'json') {
-      return formatContextAsJson(context);
+      // Return formatted output or raw context
+      if (opts.format === 'markdown') {
+        return formatContextAsMarkdown(context);
+      } else if (opts.format === 'json') {
+        return formatContextAsJson(context);
+      }
+
+      return context;
+    } finally {
+      // Clear file content cache to free memory after each buildContext call
+      this.fileContentCache.clear();
     }
-
-    return context;
   }
 
   /**
@@ -334,7 +340,11 @@ export class ContextBuilder {
     }
 
     try {
-      const content = fs.readFileSync(filePath, 'utf-8');
+      let content = this.fileContentCache.get(filePath);
+      if (content === undefined) {
+        content = fs.readFileSync(filePath, 'utf-8');
+        this.fileContentCache.set(filePath, content);
+      }
       const lines = content.split('\n');
 
       // Extract lines (1-indexed to 0-indexed)
