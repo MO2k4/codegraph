@@ -49,6 +49,8 @@ import { VectorManager, createVectorManager, EmbeddingProgress } from './vectors
 import { ContextBuilder, createContextBuilder } from './context';
 import { GitHooksManager, createGitHooksManager, HookInstallResult, HookRemoveResult } from './sync';
 import { Mutex, FileLock } from './utils';
+import { getRuntimeVersion } from './version';
+import { ScipImporter } from './scip';
 
 // Re-export types for consumers
 export * from './types';
@@ -395,6 +397,17 @@ export class CodeGraph {
             total: 1,
           });
           this.resolveReferences();
+        }
+
+        // Write provenance metadata
+        const version = getRuntimeVersion();
+        this.queries.setMetadata('codegraph_version', version.package);
+        this.queries.setMetadata('last_indexed_at', new Date().toISOString());
+        if (version.git) {
+          this.queries.setMetadata('codegraph_git', version.git);
+        }
+        if (!this.queries.getMetadata('first_indexed_at')) {
+          this.queries.setMetadata('first_indexed_at', new Date().toISOString());
         }
 
         return result;
@@ -976,6 +989,52 @@ export class CodeGraph {
    */
   removeGitHooks(): HookRemoveResult {
     return this.gitHooksManager.removeHook();
+  }
+
+  /**
+   * Get all project metadata
+   */
+  getMetadata(): Record<string, string> | null {
+    try {
+      return this.queries.getAllMetadata();
+    } catch {
+      return null;
+    }
+  }
+
+  // ===========================================================================
+  // SCIP Import
+  // ===========================================================================
+
+  /**
+   * Import SCIP semantic data
+   */
+  importSCIP(scipPath?: string): { edgesCreated: number; documentsProcessed: number } {
+    if (!this.db || !this.queries) {
+      throw new Error('CodeGraph not initialized. Call init() or open() first.');
+    }
+
+    const importer = new ScipImporter(this.projectRoot, this.queries);
+
+    if (scipPath) {
+      return importer.importSCIP(scipPath);
+    }
+
+    // Auto-detect SCIP files
+    const scipFiles = ScipImporter.findSCIPFiles(this.projectRoot);
+    if (scipFiles.length === 0) {
+      return { edgesCreated: 0, documentsProcessed: 0 };
+    }
+
+    let totalEdges = 0;
+    let totalDocs = 0;
+    for (const file of scipFiles) {
+      const result = importer.importSCIP(file);
+      totalEdges += result.edgesCreated;
+      totalDocs += result.documentsProcessed;
+    }
+
+    return { edgesCreated: totalEdges, documentsProcessed: totalDocs };
   }
 
   // ===========================================================================
