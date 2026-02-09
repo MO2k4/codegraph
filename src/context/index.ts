@@ -24,6 +24,7 @@ import { VectorManager } from '../vectors';
 import { formatContextAsMarkdown, formatContextAsJson } from './formatter';
 import { logDebug, logWarn } from '../errors';
 import { isPathWithinRoot } from '../utils';
+import { scorePathRelevance, kindBonus } from '../search/query-utils';
 
 /**
  * Default options for context building
@@ -209,8 +210,20 @@ export class ContextBuilder {
       }
     }
 
-    // Filter by minimum score
-    const filteredResults = searchResults.filter((r) => r.score >= opts.minScore);
+    // Apply multi-signal composite scoring
+    const scoredResults = searchResults.map(r => {
+      const lexicalScore = r.score * 0.4;
+      const kindScore = kindBonus(r.node.kind) * 0.02; // normalize to ~0.2 max
+      const pathScore = scorePathRelevance(r.node.filePath, query) * 0.02;
+      return {
+        ...r,
+        score: lexicalScore + kindScore + pathScore,
+      };
+    });
+
+    // Sort by composite score and filter by minimum
+    scoredResults.sort((a, b) => b.score - a.score);
+    const filteredResults = scoredResults.filter((r) => r.score >= opts.minScore);
 
     // Add entry points to subgraph
     for (const result of filteredResults) {

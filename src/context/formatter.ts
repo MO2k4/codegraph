@@ -21,17 +21,27 @@ export function formatContextAsMarkdown(context: TaskContext): string {
   lines.push('## Code Context\n');
   lines.push(`**Query:** ${context.query}\n`);
 
-  // Entry points - compact format
+  // Entry points with relationship context
   if (context.entryPoints.length > 0) {
     lines.push('### Entry Points\n');
     for (const node of context.entryPoints) {
       const location = node.startLine ? `:${node.startLine}` : '';
-      lines.push(`- **${node.name}** (${node.kind}) - ${node.filePath}${location}`);
+      lines.push(`#### ${node.name} (${node.filePath}${location})`);
       if (node.signature) {
-        lines.push(`  \`${node.signature}\``);
+        lines.push(`\`${node.signature}\``);
       }
+
+      // Include relationship context
+      const callers = getRelationshipNames(context.subgraph, node.id, 'incoming', 'calls');
+      const callees = getRelationshipNames(context.subgraph, node.id, 'outgoing', 'calls');
+      if (callers.length > 0) {
+        lines.push(`Called by: ${callers.join(', ')}`);
+      }
+      if (callees.length > 0) {
+        lines.push(`Calls: ${callees.join(', ')}`);
+      }
+      lines.push('');
     }
-    lines.push('');
   }
 
   // Related symbols - compact list (skip verbose structure tree)
@@ -255,6 +265,29 @@ function truncate(str: string, maxLength: number): string {
     return str;
   }
   return str.slice(0, maxLength - 3) + '...';
+}
+
+/**
+ * Get names of related nodes via specific edge kind/direction
+ */
+function getRelationshipNames(
+  subgraph: Subgraph,
+  nodeId: string,
+  direction: 'incoming' | 'outgoing',
+  edgeKind: string
+): string[] {
+  const names: string[] = [];
+  for (const edge of subgraph.edges) {
+    if (edge.kind !== edgeKind) continue;
+    if (direction === 'incoming' && edge.target === nodeId) {
+      const node = subgraph.nodes.get(edge.source);
+      if (node) names.push(node.name);
+    } else if (direction === 'outgoing' && edge.source === nodeId) {
+      const node = subgraph.nodes.get(edge.target);
+      if (node) names.push(node.name);
+    }
+  }
+  return names;
 }
 
 /**
