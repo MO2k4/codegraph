@@ -67,6 +67,10 @@ export class VectorManager {
   private batchSize: number;
   private initialized = false;
 
+  /** LRU-like cache for query embeddings (max 50 entries) */
+  private queryEmbeddingCache = new Map<string, Float32Array>();
+  private static readonly QUERY_CACHE_MAX_SIZE = 50;
+
   constructor(
     db: Database.Database,
     queries: QueryBuilder,
@@ -186,6 +190,35 @@ export class VectorManager {
   }
 
   /**
+   * Get a cached query embedding, or generate and cache a new one.
+   * Uses an LRU-like eviction strategy: when the cache exceeds the max size,
+   * the oldest entry (first inserted) is removed.
+   */
+  private async getCachedQueryEmbedding(query: string): Promise<Float32Array> {
+    const cached = this.queryEmbeddingCache.get(query);
+    if (cached) {
+      // Move to end (most recently used) by re-inserting
+      this.queryEmbeddingCache.delete(query);
+      this.queryEmbeddingCache.set(query, cached);
+      return cached;
+    }
+
+    const result = await this.embedder.embedQuery(query);
+    const embedding = result.embedding;
+
+    // Evict oldest entry if cache is full
+    if (this.queryEmbeddingCache.size >= VectorManager.QUERY_CACHE_MAX_SIZE) {
+      const oldestKey = this.queryEmbeddingCache.keys().next().value;
+      if (oldestKey !== undefined) {
+        this.queryEmbeddingCache.delete(oldestKey);
+      }
+    }
+
+    this.queryEmbeddingCache.set(query, embedding);
+    return embedding;
+  }
+
+  /**
    * Semantic search for nodes matching a query
    *
    * @param query - Natural language query
@@ -199,11 +232,11 @@ export class VectorManager {
 
     const { limit = 10, kinds } = options;
 
-    // Generate query embedding
-    const queryResult = await this.embedder.embedQuery(query);
+    // Generate query embedding (with cache)
+    const queryEmbedding = await this.getCachedQueryEmbedding(query);
 
     // Search for similar vectors
-    const vectorResults = this.searchManager.search(queryResult.embedding, {
+    const vectorResults = this.searchManager.search(queryEmbedding, {
       limit: limit * 2, // Get more results to filter
       minScore: 0.3, // Minimum similarity threshold
     });

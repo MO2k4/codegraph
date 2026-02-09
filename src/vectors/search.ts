@@ -25,6 +25,80 @@ export interface VectorSearchOptions {
 }
 
 /**
+ * A min-heap that maintains only the top-K highest-scoring items.
+ * Used for efficiently finding top results without sorting all candidates.
+ */
+class TopKHeap {
+  private heap: Array<{ nodeId: string; score: number }> = [];
+  private k: number;
+
+  constructor(k: number) {
+    this.k = k;
+  }
+
+  /**
+   * Push an item into the heap. If the heap exceeds size K,
+   * the lowest-scoring item is removed.
+   */
+  push(item: { nodeId: string; score: number }): void {
+    if (this.heap.length < this.k) {
+      this.heap.push(item);
+      this.bubbleUp(this.heap.length - 1);
+    } else if (this.heap.length > 0 && item.score > this.heap[0]!.score) {
+      // Replace the root (minimum) with the new item
+      this.heap[0] = item;
+      this.sinkDown(0);
+    }
+  }
+
+  /**
+   * Extract all items sorted by score descending.
+   */
+  toSortedArray(): Array<{ nodeId: string; score: number }> {
+    return [...this.heap].sort((a, b) => b.score - a.score);
+  }
+
+  get size(): number {
+    return this.heap.length;
+  }
+
+  private bubbleUp(i: number): void {
+    while (i > 0) {
+      const parent = Math.floor((i - 1) / 2);
+      if (this.heap[parent]!.score > this.heap[i]!.score) {
+        [this.heap[parent]!, this.heap[i]!] = [this.heap[i]!, this.heap[parent]!];
+        i = parent;
+      } else {
+        break;
+      }
+    }
+  }
+
+  private sinkDown(i: number): void {
+    const n = this.heap.length;
+    while (true) {
+      let smallest = i;
+      const left = 2 * i + 1;
+      const right = 2 * i + 2;
+
+      if (left < n && this.heap[left]!.score < this.heap[smallest]!.score) {
+        smallest = left;
+      }
+      if (right < n && this.heap[right]!.score < this.heap[smallest]!.score) {
+        smallest = right;
+      }
+
+      if (smallest !== i) {
+        [this.heap[smallest]!, this.heap[i]!] = [this.heap[i]!, this.heap[smallest]!];
+        i = smallest;
+      } else {
+        break;
+      }
+    }
+  }
+}
+
+/**
  * Vector Search Manager
  *
  * Handles vector storage and similarity search for semantic code search.
@@ -33,6 +107,12 @@ export class VectorSearchManager {
   private db: Database.Database;
   private vssEnabled = false;
   private embeddingDimension: number;
+
+  /**
+   * Cache for Float32Array conversions from SQLite BLOBs.
+   * Keyed by node_id; invalidated when vectors are stored or deleted.
+   */
+  private vectorCache = new Map<string, Float32Array>();
 
   constructor(db: Database.Database, dimension: number = EMBEDDING_DIMENSION) {
     this.db = db;
@@ -162,6 +242,9 @@ export class VectorSearchManager {
       )
       .run(nodeId, blob, model, now);
 
+    // Update the Float32Array cache with the new embedding
+    this.vectorCache.set(nodeId, embedding);
+
     // Also store in VSS table if enabled
     if (this.vssEnabled) {
       this.storeInVss(nodeId, embedding);
@@ -235,6 +318,9 @@ export class VectorSearchManager {
           )
           .run(entry.nodeId, blob, model, now);
 
+        // Update the Float32Array cache
+        this.vectorCache.set(entry.nodeId, entry.embedding);
+
         if (this.vssEnabled) {
           this.storeInVss(entry.nodeId, entry.embedding);
         }
@@ -249,6 +335,12 @@ export class VectorSearchManager {
    * @returns Embedding or null if not found
    */
   getVector(nodeId: string): Float32Array | null {
+    // Check the cache first
+    const cached = this.vectorCache.get(nodeId);
+    if (cached) {
+      return cached;
+    }
+
     const row = this.db
       .prepare('SELECT embedding FROM vectors WHERE node_id = ?')
       .get(nodeId) as { embedding: Buffer } | undefined;
@@ -257,10 +349,15 @@ export class VectorSearchManager {
       return null;
     }
 
-    return new Float32Array(row.embedding.buffer.slice(
+    const embedding = new Float32Array(row.embedding.buffer.slice(
       row.embedding.byteOffset,
       row.embedding.byteOffset + row.embedding.byteLength
     ));
+
+    // Cache the conversion for future lookups
+    this.vectorCache.set(nodeId, embedding);
+
+    return embedding;
   }
 
   /**
@@ -270,6 +367,9 @@ export class VectorSearchManager {
    */
   deleteVector(nodeId: string): void {
     this.db.prepare('DELETE FROM vectors WHERE node_id = ?').run(nodeId);
+
+    // Invalidate the cache entry
+    this.vectorCache.delete(nodeId);
 
     if (this.vssEnabled) {
       // Get the rowid before deleting
@@ -295,12 +395,12 @@ export class VectorSearchManager {
     queryEmbedding: Float32Array,
     options: VectorSearchOptions = {}
   ): Array<{ nodeId: string; score: number }> {
-    const { limit = 10, minScore = 0 } = options;
+    const { limit = 10, minScore = 0, nodeKinds } = options;
 
     if (this.vssEnabled) {
       return this.searchWithVss(queryEmbedding, limit, minScore);
     } else {
-      return this.searchBruteForce(queryEmbedding, limit, minScore);
+      return this.searchBruteForce(queryEmbedding, limit, minScore, nodeKinds);
     }
   }
 
@@ -355,36 +455,89 @@ export class VectorSearchManager {
 
   /**
    * Brute-force search using cosine similarity
+   *
+   * Optimizations applied:
+   * (a) SQL-level nodeKinds filtering via JOIN with nodes table
+   * (b) Min-heap of size `limit` for top-K selection (O(N log K) vs O(N log N))
+   * (c) Float32Array conversion cache to avoid repeated Buffer-to-Float32Array conversions
    */
   private searchBruteForce(
     queryEmbedding: Float32Array,
     limit: number,
-    minScore: number
+    minScore: number,
+    nodeKinds?: Node['kind'][]
   ): Array<{ nodeId: string; score: number }> {
-    // Get all vectors
-    const rows = this.db
-      .prepare('SELECT node_id, embedding FROM vectors')
-      .all() as Array<{ node_id: string; embedding: Buffer }>;
+    // (a) SQL-level nodeKinds filtering: JOIN with nodes table when filtering by kind
+    let rows: Array<{ node_id: string; embedding: Buffer }>;
 
-    // Calculate cosine similarity for each
-    const results: Array<{ nodeId: string; score: number }> = [];
-
-    for (const row of rows) {
-      const embedding = new Float32Array(row.embedding.buffer.slice(
-        row.embedding.byteOffset,
-        row.embedding.byteOffset + row.embedding.byteLength
-      ));
-
-      const score = TextEmbedder.cosineSimilarity(queryEmbedding, embedding);
-
-      if (score >= minScore) {
-        results.push({ nodeId: row.node_id, score });
-      }
+    if (nodeKinds && nodeKinds.length > 0) {
+      // Build parameterized placeholders for the IN clause
+      const placeholders = nodeKinds.map(() => '?').join(', ');
+      rows = this.db
+        .prepare(
+          `SELECT v.node_id, v.embedding FROM vectors v
+           JOIN nodes n ON n.id = v.node_id
+           WHERE n.kind IN (${placeholders})`
+        )
+        .all(...nodeKinds) as Array<{ node_id: string; embedding: Buffer }>;
+    } else {
+      rows = this.db
+        .prepare('SELECT node_id, embedding FROM vectors')
+        .all() as Array<{ node_id: string; embedding: Buffer }>;
     }
 
-    // Sort by score descending and limit
-    results.sort((a, b) => b.score - a.score);
-    return results.slice(0, limit);
+    // (b) Use min-heap for large result sets, simple array + sort for small ones
+    const useHeap = rows.length >= 100;
+
+    if (useHeap) {
+      // Min-heap approach: O(N log K) where K = limit
+      const heap = new TopKHeap(limit);
+
+      for (const row of rows) {
+        // (c) Use cached Float32Array conversion if available
+        let embedding = this.vectorCache.get(row.node_id);
+        if (!embedding) {
+          embedding = new Float32Array(row.embedding.buffer.slice(
+            row.embedding.byteOffset,
+            row.embedding.byteOffset + row.embedding.byteLength
+          ));
+          this.vectorCache.set(row.node_id, embedding);
+        }
+
+        const score = TextEmbedder.cosineSimilarity(queryEmbedding, embedding);
+
+        if (score >= minScore) {
+          heap.push({ nodeId: row.node_id, score });
+        }
+      }
+
+      return heap.toSortedArray();
+    } else {
+      // Small result set: simple sort is fine
+      const results: Array<{ nodeId: string; score: number }> = [];
+
+      for (const row of rows) {
+        // (c) Use cached Float32Array conversion if available
+        let embedding = this.vectorCache.get(row.node_id);
+        if (!embedding) {
+          embedding = new Float32Array(row.embedding.buffer.slice(
+            row.embedding.byteOffset,
+            row.embedding.byteOffset + row.embedding.byteLength
+          ));
+          this.vectorCache.set(row.node_id, embedding);
+        }
+
+        const score = TextEmbedder.cosineSimilarity(queryEmbedding, embedding);
+
+        if (score >= minScore) {
+          results.push({ nodeId: row.node_id, score });
+        }
+      }
+
+      // Sort by score descending and limit
+      results.sort((a, b) => b.score - a.score);
+      return results.slice(0, limit);
+    }
   }
 
   /**
@@ -422,6 +575,9 @@ export class VectorSearchManager {
    */
   clear(): void {
     this.db.prepare('DELETE FROM vectors').run();
+
+    // Clear the Float32Array cache
+    this.vectorCache.clear();
 
     if (this.vssEnabled) {
       this.db.prepare('DELETE FROM vss_vectors').run();

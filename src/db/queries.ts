@@ -770,14 +770,90 @@ export class QueryBuilder {
   }
 
   /**
-   * Get files that need re-indexing (hash changed)
+   * Get files that need re-indexing (hash changed).
+   *
+   * Uses a temporary table + JOIN so the filtering happens entirely in SQL
+   * instead of loading every FileRecord into JS and comparing in a loop.
+   * For large projects (10k+ tracked files) this avoids materialising the
+   * full `files` table into JavaScript objects.
    */
   getStaleFiles(currentHashes: Map<string, string>): FileRecord[] {
-    const files = this.getAllFiles();
-    return files.filter((f) => {
-      const currentHash = currentHashes.get(f.path);
-      return currentHash && currentHash !== f.contentHash;
-    });
+    if (currentHashes.size === 0) return [];
+
+    // Create a temporary table to hold the caller's hashes
+    this.db.exec(`
+      CREATE TEMP TABLE IF NOT EXISTS _current_hashes (
+        path TEXT PRIMARY KEY,
+        content_hash TEXT NOT NULL
+      )
+    `);
+    this.db.exec('DELETE FROM _current_hashes');
+
+    // Bulk-insert current hashes into the temp table inside a transaction
+    const insertHash = this.db.prepare(
+      'INSERT INTO _current_hashes (path, content_hash) VALUES (?, ?)'
+    );
+    this.db.transaction(() => {
+      for (const [filePath, hash] of currentHashes) {
+        insertHash.run(filePath, hash);
+      }
+    })();
+
+    // Single JOIN query: find tracked files whose hash differs from the
+    // current on-disk hash.  The INNER JOIN naturally limits results to
+    // paths present in both tables (i.e. files that still exist on disk).
+    const rows = this.db.prepare(`
+      SELECT f.*
+      FROM files f
+      INNER JOIN _current_hashes ch ON f.path = ch.path
+      WHERE f.content_hash != ch.content_hash
+    `).all() as FileRow[];
+
+    // Clean up temp data (table structure is reused across calls)
+    this.db.exec('DELETE FROM _current_hashes');
+
+    return rows.map(rowToFileRecord);
+  }
+
+  /**
+   * Get a lightweight map of tracked file paths to their content hashes.
+   *
+   * Much cheaper than getAllFiles() when the caller only needs paths and
+   * hashes (e.g. for stale-file detection or change diffing) because it
+   * skips deserialising every column into full FileRecord objects.
+   */
+  getFileHashMap(): Map<string, string> {
+    const rows = this.db.prepare(
+      'SELECT path, content_hash FROM files'
+    ).all() as Array<{ path: string; content_hash: string }>;
+
+    const map = new Map<string, string>();
+    for (const row of rows) {
+      map.set(row.path, row.content_hash);
+    }
+    return map;
+  }
+
+  /**
+   * Get a lightweight map of tracked file paths to mtime + size + hash.
+   *
+   * Useful for sync operations that do mtime/size pre-checks before
+   * falling back to hash comparison, without loading full FileRecords.
+   */
+  getFileSyncMap(): Map<string, { contentHash: string; modifiedAt: number; size: number }> {
+    const rows = this.db.prepare(
+      'SELECT path, content_hash, modified_at, size FROM files'
+    ).all() as Array<{ path: string; content_hash: string; modified_at: number; size: number }>;
+
+    const map = new Map<string, { contentHash: string; modifiedAt: number; size: number }>();
+    for (const row of rows) {
+      map.set(row.path, {
+        contentHash: row.content_hash,
+        modifiedAt: row.modified_at,
+        size: row.size,
+      });
+    }
+    return map;
   }
 
   // ===========================================================================
@@ -900,20 +976,20 @@ export class QueryBuilder {
   }
 
   /**
-   * Get graph statistics
+   * Get graph statistics.
+   *
+   * Uses a single multi-result query for the three top-level counts
+   * instead of three separate round-trips.  The GROUP BY queries are
+   * already efficient (one scan each) and remain separate for clarity.
    */
   getStats(): GraphStats {
-    const nodeCount = (
-      this.db.prepare('SELECT COUNT(*) as count FROM nodes').get() as { count: number }
-    ).count;
-
-    const edgeCount = (
-      this.db.prepare('SELECT COUNT(*) as count FROM edges').get() as { count: number }
-    ).count;
-
-    const fileCount = (
-      this.db.prepare('SELECT COUNT(*) as count FROM files').get() as { count: number }
-    ).count;
+    // Single query for all three aggregate counts
+    const counts = this.db.prepare(`
+      SELECT
+        (SELECT COUNT(*) FROM nodes) AS node_count,
+        (SELECT COUNT(*) FROM edges) AS edge_count,
+        (SELECT COUNT(*) FROM files) AS file_count
+    `).get() as { node_count: number; edge_count: number; file_count: number };
 
     const nodesByKind = {} as Record<NodeKind, number>;
     const nodeKindRows = this.db
@@ -940,9 +1016,9 @@ export class QueryBuilder {
     }
 
     return {
-      nodeCount,
-      edgeCount,
-      fileCount,
+      nodeCount: counts.node_count,
+      edgeCount: counts.edge_count,
+      fileCount: counts.file_count,
       nodesByKind,
       edgesByKind,
       filesByLanguage,

@@ -135,6 +135,7 @@ CREATE INDEX IF NOT EXISTS idx_files_modified_at ON files(modified_at);
 CREATE INDEX IF NOT EXISTS idx_unresolved_from_node ON unresolved_refs(from_node_id);
 CREATE INDEX IF NOT EXISTS idx_unresolved_name ON unresolved_refs(reference_name);
 CREATE INDEX IF NOT EXISTS idx_unresolved_file_path ON unresolved_refs(file_path);
+CREATE INDEX IF NOT EXISTS idx_unresolved_from_name ON unresolved_refs(from_node_id, reference_name);
 CREATE INDEX IF NOT EXISTS idx_edges_provenance ON edges(provenance);
 
 -- =============================================================================

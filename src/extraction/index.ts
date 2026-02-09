@@ -589,7 +589,11 @@ export class ExtractionOrchestrator {
   }
 
   /**
-   * Sync with current file state
+   * Sync with current file state.
+   *
+   * Uses getFileSyncMap() instead of getAllFiles() so we only fetch the
+   * four columns needed for change detection (path, hash, mtime, size)
+   * rather than materialising full FileRecord objects with JSON parsing.
    */
   async sync(onProgress?: (progress: IndexProgress) => void): Promise<SyncResult> {
     const startTime = Date.now();
@@ -609,21 +613,15 @@ export class ExtractionOrchestrator {
     const currentFiles = new Set(scanDirectory(this.rootDir, this.config));
     filesChecked = currentFiles.size;
 
-    // Get tracked files from database
-    const trackedFiles = this.queries.getAllFiles();
+    // Get lightweight tracked-file map from database (path -> {hash, mtime, size})
+    const trackedMap = this.queries.getFileSyncMap();
 
     // Find files to remove (in DB but not on disk)
-    for (const tracked of trackedFiles) {
-      if (!currentFiles.has(tracked.path)) {
-        this.queries.deleteFile(tracked.path);
+    for (const trackedPath of trackedMap.keys()) {
+      if (!currentFiles.has(trackedPath)) {
+        this.queries.deleteFile(trackedPath);
         filesRemoved++;
       }
-    }
-
-    // Build a lookup map for tracked files to avoid O(n) find per file
-    const trackedMap = new Map<string, FileRecord>();
-    for (const tf of trackedFiles) {
-      trackedMap.set(tf.path, tf);
     }
 
     // Find files to add or update
@@ -696,27 +694,24 @@ export class ExtractionOrchestrator {
   }
 
   /**
-   * Get files that have changed since last index
+   * Get files that have changed since last index.
+   *
+   * Uses getFileSyncMap() for lightweight change detection without
+   * deserialising full FileRecord objects.
    */
   getChangedFiles(): { added: string[]; modified: string[]; removed: string[] } {
     const currentFiles = new Set(scanDirectory(this.rootDir, this.config));
-    const trackedFiles = this.queries.getAllFiles();
+    const trackedMap = this.queries.getFileSyncMap();
 
     const added: string[] = [];
     const modified: string[] = [];
     const removed: string[] = [];
 
     // Find removed files
-    for (const tracked of trackedFiles) {
-      if (!currentFiles.has(tracked.path)) {
-        removed.push(tracked.path);
+    for (const trackedPath of trackedMap.keys()) {
+      if (!currentFiles.has(trackedPath)) {
+        removed.push(trackedPath);
       }
-    }
-
-    // Build a lookup map for tracked files to avoid O(n) find per file
-    const trackedMap = new Map<string, FileRecord>();
-    for (const tf of trackedFiles) {
-      trackedMap.set(tf.path, tf);
     }
 
     // Find added and modified files
