@@ -22,7 +22,8 @@
     "test:watch": "vitest",
     "test:eval": "vitest run __tests__/evaluation/",
     "eval": "npm run build && npx tsx __tests__/evaluation/runner.ts",
-    "clean": "rm -rf dist"
+    "clean": "rm -rf dist",
+    "local-install": "npm run build && npm install -g ."
   },
   "keywords": [
     "code-intelligence",
