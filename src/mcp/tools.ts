@@ -184,37 +184,108 @@ export const tools: ToolDefinition[] = [
       properties: {},
     },
   },
+  {
+    name: 'codegraph_get_root',
+    description: 'Get the current project root directory.',
+    inputSchema: {
+      type: 'object',
+      properties: {},
+    },
+  },
+  {
+    name: 'codegraph_set_root',
+    description: 'Set the project root directory. Re-initializes CodeGraph for the new path.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        path: {
+          type: 'string',
+          description: 'Absolute path to the project root directory',
+        },
+      },
+      required: ['path'],
+    },
+  },
+  {
+    name: 'codegraph_init',
+    description: 'Initialize CodeGraph for the current project root. Creates the .codegraph directory and database.',
+    inputSchema: {
+      type: 'object',
+      properties: {},
+    },
+  },
+  {
+    name: 'codegraph_index',
+    description: 'Run a full index of the project. Parses all files and builds the code knowledge graph.',
+    inputSchema: {
+      type: 'object',
+      properties: {},
+    },
+  },
+  {
+    name: 'codegraph_sync',
+    description: 'Incrementally sync changes since last index. Faster than full index for small changes.',
+    inputSchema: {
+      type: 'object',
+      properties: {},
+    },
+  },
+  {
+    name: 'codegraph_uninit',
+    description: 'Remove CodeGraph from the project. Deletes the .codegraph directory and all data.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        force: {
+          type: 'boolean',
+          description: 'Skip confirmation (default: false)',
+          default: false,
+        },
+      },
+    },
+  },
 ];
 
 /**
  * Tool handler that executes tools against a CodeGraph instance
  */
 export class ToolHandler {
-  constructor(private cg: CodeGraph) {}
+  private onSetRoot?: (path: string) => void;
+
+  constructor(private cg: CodeGraph, options?: { onSetRoot?: (path: string) => void }) {
+    this.onSetRoot = options?.onSetRoot;
+  }
 
   /**
    * Execute a tool by name
    */
   async execute(toolName: string, args: Record<string, unknown>): Promise<ToolResult> {
+    // Normalize tool name: strip codegraph_ prefix
+    const normalized = toolName.replace(/^codegraph_/, '');
+
+    const handlers: Record<string, (args: Record<string, unknown>) => Promise<ToolResult>> = {
+      search: (a) => this.handleSearch(a),
+      context: (a) => this.handleContext(a),
+      callers: (a) => this.handleCallers(a),
+      callees: (a) => this.handleCallees(a),
+      impact: (a) => this.handleImpact(a),
+      node: (a) => this.handleNode(a),
+      status: () => this.handleStatus(),
+      get_root: () => this.handleGetRoot(),
+      set_root: (a) => this.handleSetRoot(a),
+      init: () => this.handleInit(),
+      index: () => this.handleIndex(),
+      sync: () => this.handleSync(),
+      uninit: (a) => this.handleUninit(a),
+    };
+
+    const handler = handlers[normalized];
+    if (!handler) {
+      return this.errorResult(`Unknown tool: ${toolName}`);
+    }
+
     try {
-      switch (toolName) {
-        case 'codegraph_search':
-          return await this.handleSearch(args);
-        case 'codegraph_context':
-          return await this.handleContext(args);
-        case 'codegraph_callers':
-          return await this.handleCallers(args);
-        case 'codegraph_callees':
-          return await this.handleCallees(args);
-        case 'codegraph_impact':
-          return await this.handleImpact(args);
-        case 'codegraph_node':
-          return await this.handleNode(args);
-        case 'codegraph_status':
-          return await this.handleStatus();
-        default:
-          return this.errorResult(`Unknown tool: ${toolName}`);
-      }
+      return await handler(args);
     } catch (err) {
       return this.errorResult(`Tool execution failed: ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -453,6 +524,55 @@ export class ToolHandler {
     }
 
     return this.textResult(lines.join('\n'));
+  }
+
+  // =========================================================================
+  // Lifecycle tool handlers
+  // =========================================================================
+
+  private async handleGetRoot(): Promise<ToolResult> {
+    return this.textResult(`Project root: ${this.cg.getProjectRoot()}`);
+  }
+
+  private async handleSetRoot(args: Record<string, unknown>): Promise<ToolResult> {
+    const rootPath = this.validateString(args.path, 'path');
+    if (typeof rootPath !== 'string') return rootPath;
+
+    if (this.onSetRoot) {
+      this.onSetRoot(rootPath);
+      return this.textResult(`Project root set to: ${rootPath}`);
+    }
+
+    return this.errorResult('set_root is not supported in this context');
+  }
+
+  private async handleInit(): Promise<ToolResult> {
+    const root = this.cg.getProjectRoot();
+    return this.textResult(`CodeGraph initialized at: ${root}`);
+  }
+
+  private async handleIndex(): Promise<ToolResult> {
+    const result = await this.cg.indexAll();
+    return this.textResult(
+      `Indexed ${result.filesIndexed} files (${result.nodesCreated} nodes, ${result.edgesCreated} edges)`
+    );
+  }
+
+  private async handleSync(): Promise<ToolResult> {
+    const result = await this.cg.sync();
+    return this.textResult(
+      `Sync complete: ${result.filesAdded} added, ${result.filesModified} modified, ${result.filesRemoved} deleted`
+    );
+  }
+
+  private async handleUninit(args: Record<string, unknown>): Promise<ToolResult> {
+    const force = args.force === true;
+    if (!force) {
+      return this.errorResult('Set force=true to confirm deletion of CodeGraph data');
+    }
+
+    this.cg.uninitialize();
+    return this.textResult('CodeGraph data removed');
   }
 
   // =========================================================================
