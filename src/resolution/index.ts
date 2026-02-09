@@ -130,6 +130,10 @@ export class ReferenceResolver {
         return this.queries.getNodesByKind(kind);
       },
 
+      getNodesByKinds: (kinds: Node['kind'][]) => {
+        return this.queries.getNodesByKinds(kinds);
+      },
+
       fileExists: (filePath: string) => {
         // Prevent path traversal
         if (!isPathWithinRoot(filePath, this.projectRoot)) {
@@ -479,7 +483,7 @@ export class ReferenceResolver {
    * Get file path from node ID
    */
   private getFilePathFromNodeId(nodeId: string): string {
-    const node = this.queries.getNodeById(nodeId);
+    const node = this.nodesById.get(nodeId) ?? this.queries.getNodeById(nodeId);
     return node?.filePath || '';
   }
 
@@ -487,7 +491,7 @@ export class ReferenceResolver {
    * Get language from node ID
    */
   private getLanguageFromNodeId(nodeId: string): UnresolvedRef['language'] {
-    const node = this.queries.getNodeById(nodeId);
+    const node = this.nodesById.get(nodeId) ?? this.queries.getNodeById(nodeId);
     return node?.language || 'unknown';
   }
 }

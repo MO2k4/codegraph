@@ -4,7 +4,7 @@
  * Types for the reference resolution system.
  */
 
-import { EdgeKind, Language, Node } from '../types';
+import { EdgeKind, Language, Node, NodeKind } from '../types';
 
 /**
  * An unresolved reference from extraction
@@ -71,6 +71,8 @@ export interface ResolutionContext {
   getNodesByQualifiedName(qualifiedName: string): Node[];
   /** Get all nodes of a kind */
   getNodesByKind(kind: Node['kind']): Node[];
+  /** Get all nodes matching any of the given kinds in a single query */
+  getNodesByKinds?: (kinds: NodeKind[]) => Node[];
   /** Check if a file exists */
   fileExists(filePath: string): boolean;
   /** Read file content */

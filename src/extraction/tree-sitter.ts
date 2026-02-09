@@ -671,6 +671,7 @@ export class TreeSitterExtractor {
   private source: string;
   private tree: Tree | null = null;
   private nodes: Node[] = [];
+  private nodeMap = new Map<string, Node>();
   private edges: Edge[] = [];
   private unresolvedReferences: UnresolvedReference[] = [];
   private errors: ExtractionError[] = [];
@@ -740,6 +741,7 @@ export class TreeSitterExtractor {
         updatedAt: Date.now(),
       };
       this.nodes.push(fileNode);
+      this.nodeMap.set(fileNode.id, fileNode);
 
       // Push file node onto stack so top-level declarations get contains edges
       this.nodeStack.push(fileNode.id);
@@ -870,6 +872,7 @@ export class TreeSitterExtractor {
     };
 
     this.nodes.push(newNode);
+    this.nodeMap.set(newNode.id, newNode);
 
     // Add containment edge from parent
     if (this.nodeStack.length > 0) {
@@ -893,7 +896,7 @@ export class TreeSitterExtractor {
     // Get names from the node stack
     const parts: string[] = [this.filePath];
     for (const nodeId of this.nodeStack) {
-      const node = this.nodes.find((n) => n.id === nodeId);
+      const node = this.nodeMap.get(nodeId);
       if (node) {
         parts.push(node.name);
       }
@@ -910,7 +913,7 @@ export class TreeSitterExtractor {
     if (this.nodeStack.length === 0) return false;
     const parentId = this.nodeStack[this.nodeStack.length - 1];
     if (!parentId) return false;
-    const parentNode = this.nodes.find((n) => n.id === parentId);
+    const parentNode = this.nodeMap.get(parentId);
     if (!parentNode) return false;
     return (
       parentNode.kind === 'class' ||

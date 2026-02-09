@@ -43,57 +43,83 @@ export class GraphQueryManager {
     // Get children
     const children = this.traverser.getChildren(nodeId);
 
-    // Get incoming references (things that reference this node)
+    // Get all edge sets
     const incomingEdges = this.queries.getIncomingEdges(nodeId);
+    const outgoingEdges = this.queries.getOutgoingEdges(nodeId);
+
+    const typeEdgeKinds: EdgeKind[] = ['type_of', 'returns'];
+    const typeEdges: Edge[] = [];
+    for (const kind of typeEdgeKinds) {
+      typeEdges.push(...this.queries.getOutgoingEdges(nodeId, [kind]));
+    }
+
+    const fileNode = ancestors.find((a) => a.kind === 'file');
+    const importEdges = fileNode
+      ? this.queries.getOutgoingEdges(fileNode.id, ['imports'])
+      : [];
+
+    // Collect all needed node IDs and batch-fetch them in one query
+    const allIds = new Set<string>();
+    for (const edge of incomingEdges) {
+      if (edge.kind !== 'contains') {
+        allIds.add(edge.source);
+      }
+    }
+    for (const edge of outgoingEdges) {
+      if (edge.kind !== 'contains') {
+        allIds.add(edge.target);
+      }
+    }
+    for (const edge of typeEdges) {
+      allIds.add(edge.target);
+    }
+    for (const edge of importEdges) {
+      allIds.add(edge.target);
+    }
+
+    const nodeMap = this.queries.getNodesByIds(Array.from(allIds));
+
+    // Build incoming references from the batch-fetched map
     const incomingRefs: Array<{ node: Node; edge: Edge }> = [];
     for (const edge of incomingEdges) {
-      // Skip containment edges (already in ancestors)
       if (edge.kind === 'contains') {
         continue;
       }
-      const node = this.queries.getNodeById(edge.source);
+      const node = nodeMap.get(edge.source);
       if (node) {
         incomingRefs.push({ node, edge });
       }
     }
 
-    // Get outgoing references (things this node references)
-    const outgoingEdges = this.queries.getOutgoingEdges(nodeId);
+    // Build outgoing references from the batch-fetched map
     const outgoingRefs: Array<{ node: Node; edge: Edge }> = [];
     for (const edge of outgoingEdges) {
-      // Skip containment edges (already in children)
       if (edge.kind === 'contains') {
         continue;
       }
-      const node = this.queries.getNodeById(edge.target);
+      const node = nodeMap.get(edge.target);
       if (node) {
         outgoingRefs.push({ node, edge });
       }
     }
 
-    // Get type information (type_of, returns edges)
+    // Build type information from the batch-fetched map
     const types: Node[] = [];
-    const typeEdgeKinds: EdgeKind[] = ['type_of', 'returns'];
-    for (const kind of typeEdgeKinds) {
-      const typeEdges = this.queries.getOutgoingEdges(nodeId, [kind]);
-      for (const edge of typeEdges) {
-        const typeNode = this.queries.getNodeById(edge.target);
-        if (typeNode && !types.some((t) => t.id === typeNode.id)) {
-          types.push(typeNode);
-        }
+    const seenTypeIds = new Set<string>();
+    for (const edge of typeEdges) {
+      const typeNode = nodeMap.get(edge.target);
+      if (typeNode && !seenTypeIds.has(typeNode.id)) {
+        seenTypeIds.add(typeNode.id);
+        types.push(typeNode);
       }
     }
 
-    // Get relevant imports
+    // Build relevant imports from the batch-fetched map
     const imports: Node[] = [];
-    const fileNode = ancestors.find((a) => a.kind === 'file');
-    if (fileNode) {
-      const importEdges = this.queries.getOutgoingEdges(fileNode.id, ['imports']);
-      for (const edge of importEdges) {
-        const importNode = this.queries.getNodeById(edge.target);
-        if (importNode) {
-          imports.push(importNode);
-        }
+    for (const edge of importEdges) {
+      const importNode = nodeMap.get(edge.target);
+      if (importNode) {
+        imports.push(importNode);
       }
     }
 

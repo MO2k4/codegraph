@@ -198,11 +198,13 @@ export function matchFuzzy(
   context: ResolutionContext
 ): ResolvedRef | null {
   // Try case-insensitive match
-  const allNodes = [
-    ...context.getNodesByKind('function'),
-    ...context.getNodesByKind('method'),
-    ...context.getNodesByKind('class'),
-  ];
+  const allNodes = context.getNodesByKinds
+    ? context.getNodesByKinds(['function', 'method', 'class'])
+    : [
+        ...context.getNodesByKind('function'),
+        ...context.getNodesByKind('method'),
+        ...context.getNodesByKind('class'),
+      ];
 
   const lowerName = ref.referenceName.toLowerCase();
 

@@ -6,6 +6,8 @@
 
 import { Node, Edge, TaskContext, Subgraph } from '../types';
 
+const SIGNIFICANT_EDGE_KINDS = new Set(['calls', 'extends', 'implements', 'imports', 'references']);
+
 /**
  * Format context as markdown
  *
@@ -175,9 +177,7 @@ function formatNodeTree(
 
   // Outgoing edges
   const edges = outgoing.get(node.id) ?? [];
-  const significantEdges = edges.filter((e) =>
-    ['calls', 'extends', 'implements', 'imports', 'references'].includes(e.kind)
-  );
+  const significantEdges = edges.filter((e) => SIGNIFICANT_EDGE_KINDS.has(e.kind));
 
   // Group by kind
   const edgesByKind = new Map<string, Edge[]>();

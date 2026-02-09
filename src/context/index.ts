@@ -232,6 +232,7 @@ export class ContextBuilder {
     }
 
     // Traverse from each entry point
+    const edgeKeys = new Set<string>();
     for (const result of filteredResults) {
       const traversalResult = this.traverser.traverseBFS(result.node.id, {
         maxDepth: opts.traversalDepth,
@@ -250,10 +251,9 @@ export class ContextBuilder {
 
       // Merge edges (avoid duplicates)
       for (const edge of traversalResult.edges) {
-        const exists = edges.some(
-          (e) => e.source === edge.source && e.target === edge.target && e.kind === edge.kind
-        );
-        if (!exists) {
+        const key = `${edge.source}|${edge.target}|${edge.kind}`;
+        if (!edgeKeys.has(key)) {
+          edgeKeys.add(key);
           edges.push(edge);
         }
       }
@@ -366,35 +366,30 @@ export class ContextBuilder {
     maxBlockSize: number
   ): Promise<CodeBlock[]> {
     const blocks: CodeBlock[] = [];
+    const rootSet = new Set(subgraph.roots);
 
-    // Prioritize entry points, then functions/methods
-    const priorityNodes: Node[] = [];
+    // Single-pass categorization
+    const entryNodes: Node[] = [];
+    const funcNodes: Node[] = [];
+    const classNodes: Node[] = [];
 
-    // First: entry points
     for (const id of subgraph.roots) {
       const node = subgraph.nodes.get(id);
       if (node) {
-        priorityNodes.push(node);
+        entryNodes.push(node);
       }
     }
 
-    // Then: functions and methods
     for (const node of subgraph.nodes.values()) {
-      if (!subgraph.roots.includes(node.id)) {
-        if (node.kind === 'function' || node.kind === 'method') {
-          priorityNodes.push(node);
-        }
+      if (rootSet.has(node.id)) continue;
+      if (node.kind === 'function' || node.kind === 'method') {
+        funcNodes.push(node);
+      } else if (node.kind === 'class') {
+        classNodes.push(node);
       }
     }
 
-    // Then: classes
-    for (const node of subgraph.nodes.values()) {
-      if (!subgraph.roots.includes(node.id)) {
-        if (node.kind === 'class') {
-          priorityNodes.push(node);
-        }
-      }
-    }
+    const priorityNodes = [...entryNodes, ...funcNodes, ...classNodes];
 
     // Extract code for priority nodes
     for (const node of priorityNodes) {
