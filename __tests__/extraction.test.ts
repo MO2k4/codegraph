@@ -122,14 +122,19 @@ export function processPayment(amount: number): Promise<Receipt> {
 `;
     const result = extractFromSource('payment.ts', code);
 
-    expect(result.nodes).toHaveLength(1);
-    expect(result.nodes[0]).toMatchObject({
+    // File node + function node
+    const fileNode = result.nodes.find((n) => n.kind === 'file');
+    expect(fileNode).toBeDefined();
+    expect(fileNode?.name).toBe('payment.ts');
+
+    const funcNode = result.nodes.find((n) => n.kind === 'function');
+    expect(funcNode).toMatchObject({
       kind: 'function',
       name: 'processPayment',
       language: 'typescript',
       isExported: true,
     });
-    expect(result.nodes[0]?.signature).toContain('amount: number');
+    expect(funcNode?.signature).toContain('amount: number');
   });
 
   it('should extract class declarations', () => {
@@ -170,8 +175,11 @@ export interface User {
 `;
     const result = extractFromSource('types.ts', code);
 
-    expect(result.nodes).toHaveLength(1);
-    expect(result.nodes[0]).toMatchObject({
+    const fileNode = result.nodes.find((n) => n.kind === 'file');
+    expect(fileNode).toBeDefined();
+
+    const ifaceNode = result.nodes.find((n) => n.kind === 'interface');
+    expect(ifaceNode).toMatchObject({
       kind: 'interface',
       name: 'User',
       isExported: true,
@@ -203,8 +211,11 @@ def calculate_total(items: list, tax_rate: float) -> float:
 `;
     const result = extractFromSource('calc.py', code);
 
-    expect(result.nodes).toHaveLength(1);
-    expect(result.nodes[0]).toMatchObject({
+    const fileNode = result.nodes.find((n) => n.kind === 'file');
+    expect(fileNode).toBeDefined();
+
+    const funcNode = result.nodes.find((n) => n.kind === 'function');
+    expect(funcNode).toMatchObject({
       kind: 'function',
       name: 'calculate_total',
       language: 'python',

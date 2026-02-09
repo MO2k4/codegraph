@@ -6,6 +6,7 @@
 
 import { SyntaxNode, Tree } from 'tree-sitter';
 import * as crypto from 'crypto';
+import * as path from 'path';
 import {
   Language,
   Node,
@@ -722,7 +723,28 @@ export class TreeSitterExtractor {
 
     try {
       this.tree = parser.parse(this.source);
+
+      // Create file node
+      const fileNode: Node = {
+        id: `file:${this.filePath}`,
+        kind: 'file',
+        name: path.basename(this.filePath),
+        qualifiedName: this.filePath,
+        filePath: this.filePath,
+        language: this.language,
+        startLine: 1,
+        endLine: this.source.split('\n').length,
+        startColumn: 0,
+        endColumn: 0,
+        isExported: false,
+        updatedAt: Date.now(),
+      };
+      this.nodes.push(fileNode);
+
+      // Push file node onto stack so top-level declarations get contains edges
+      this.nodeStack.push(fileNode.id);
       this.visitNode(this.tree.rootNode);
+      this.nodeStack.pop();
     } catch (error) {
       this.errors.push({
         message: `Parse error: ${error instanceof Error ? error.message : String(error)}`,
@@ -751,7 +773,7 @@ export class TreeSitterExtractor {
     // Check for function declarations
     // For Python/Ruby, function_definition inside a class should be treated as method
     if (this.extractor.functionTypes.includes(nodeType)) {
-      if (this.nodeStack.length > 0 && this.extractor.methodTypes.includes(nodeType)) {
+      if (this.isInsideClassLikeNode() && this.extractor.methodTypes.includes(nodeType)) {
         // Inside a class - treat as method
         this.extractMethod(node);
         skipChildren = true; // extractMethod visits children via visitFunctionBody
@@ -792,6 +814,14 @@ export class TreeSitterExtractor {
     else if (this.extractor.enumTypes.includes(nodeType)) {
       this.extractEnum(node);
       skipChildren = true; // extractEnum visits body children
+    }
+    // Check for arrow functions / function expressions assigned to variables (JS/TS)
+    else if (nodeType === 'variable_declarator') {
+      const valueNode = getChildByField(node, 'value');
+      if (valueNode && (valueNode.type === 'arrow_function' || valueNode.type === 'function')) {
+        this.extractFunctionVariable(node);
+        skipChildren = true;
+      }
     }
     // Check for imports
     else if (this.extractor.importTypes.includes(nodeType)) {
@@ -873,6 +903,25 @@ export class TreeSitterExtractor {
   }
 
   /**
+   * Check if the current node stack indicates we are inside a class-like node
+   * (class, struct, interface, trait). File nodes do not count as class-like.
+   */
+  private isInsideClassLikeNode(): boolean {
+    if (this.nodeStack.length === 0) return false;
+    const parentId = this.nodeStack[this.nodeStack.length - 1];
+    if (!parentId) return false;
+    const parentNode = this.nodes.find((n) => n.id === parentId);
+    if (!parentNode) return false;
+    return (
+      parentNode.kind === 'class' ||
+      parentNode.kind === 'struct' ||
+      parentNode.kind === 'interface' ||
+      parentNode.kind === 'trait' ||
+      parentNode.kind === 'enum'
+    );
+  }
+
+  /**
    * Check if a node has a child of a specific type
    */
   private hasChildOfType(node: SyntaxNode, type: string): boolean {
@@ -881,6 +930,66 @@ export class TreeSitterExtractor {
       if (child?.type === type) {
         return true;
       }
+    }
+    return false;
+  }
+
+  /**
+   * Extract an arrow function or function expression assigned to a variable
+   */
+  private extractFunctionVariable(node: SyntaxNode): void {
+    if (!this.extractor) return;
+
+    // Only handle variable_declarator where value is arrow_function or function
+    if (node.type !== 'variable_declarator') return;
+
+    const nameNode = getChildByField(node, 'name');
+    const valueNode = getChildByField(node, 'value');
+
+    if (!nameNode || !valueNode) return;
+    if (valueNode.type !== 'arrow_function' && valueNode.type !== 'function') return;
+
+    const name = getNodeText(nameNode, this.source);
+    if (!name) return;
+
+    // Check if exported by walking parents
+    const isExported = this.isVariableExported(node);
+
+    // Build signature from the arrow function parameters
+    let signature: string | undefined;
+    const params = getChildByField(valueNode, 'parameters');
+    if (params) {
+      signature = `${name}${getNodeText(params, this.source)}`;
+    }
+
+    // Check if async
+    const isAsync = this.extractor.isAsync?.(valueNode);
+
+    const funcNode = this.createNode('function', name, node, {
+      isExported,
+      signature: signature || undefined,
+      isAsync,
+    });
+
+    // Push to stack and visit body for call extraction
+    this.nodeStack.push(funcNode.id);
+    const body = getChildByField(valueNode, this.extractor.bodyField);
+    if (body) {
+      this.visitFunctionBody(body, funcNode.id);
+    }
+    this.nodeStack.pop();
+  }
+
+  /**
+   * Check if a variable declaration is exported by walking up the AST
+   */
+  private isVariableExported(node: SyntaxNode): boolean {
+    let current = node.parent;
+    while (current) {
+      if (current.type === 'export_statement') return true;
+      // Stop at the program/module level
+      if (current.type === 'program' || current.type === 'module') break;
+      current = current.parent;
     }
     return false;
   }
@@ -961,8 +1070,8 @@ export class TreeSitterExtractor {
 
     // For most languages, only extract as method if inside a class
     // But Go methods are top-level with a receiver, so always treat them as methods
-    if (this.nodeStack.length === 0 && this.language !== 'go') {
-      // Top-level and not Go, treat as function
+    if (!this.isInsideClassLikeNode() && this.language !== 'go') {
+      // Not inside a class and not Go, treat as function
       this.extractFunction(node);
       return;
     }
