@@ -49,6 +49,7 @@ CREATE TABLE IF NOT EXISTS edges (
     metadata TEXT, -- JSON object
     line INTEGER,
     col INTEGER,
+    provenance TEXT DEFAULT NULL,
     FOREIGN KEY (source) REFERENCES nodes(id) ON DELETE CASCADE,
     FOREIGN KEY (target) REFERENCES nodes(id) ON DELETE CASCADE
 );
@@ -74,6 +75,8 @@ CREATE TABLE IF NOT EXISTS unresolved_refs (
     line INTEGER NOT NULL,
     col INTEGER NOT NULL,
     candidates TEXT, -- JSON array
+    file_path TEXT NOT NULL DEFAULT '',
+    language TEXT NOT NULL DEFAULT 'unknown',
     FOREIGN KEY (from_node_id) REFERENCES nodes(id) ON DELETE CASCADE
 );
 
@@ -131,6 +134,8 @@ CREATE INDEX IF NOT EXISTS idx_files_modified_at ON files(modified_at);
 -- Unresolved refs indexes
 CREATE INDEX IF NOT EXISTS idx_unresolved_from_node ON unresolved_refs(from_node_id);
 CREATE INDEX IF NOT EXISTS idx_unresolved_name ON unresolved_refs(reference_name);
+CREATE INDEX IF NOT EXISTS idx_unresolved_file_path ON unresolved_refs(file_path);
+CREATE INDEX IF NOT EXISTS idx_edges_provenance ON edges(provenance);
 
 -- =============================================================================
 -- Vector Storage (for future semantic search)
@@ -147,3 +152,10 @@ CREATE TABLE IF NOT EXISTS vectors (
 );
 
 CREATE INDEX IF NOT EXISTS idx_vectors_model ON vectors(model);
+
+-- Project metadata for version/provenance tracking
+CREATE TABLE IF NOT EXISTS project_metadata (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_at INTEGER NOT NULL
+);

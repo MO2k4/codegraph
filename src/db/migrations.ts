@@ -9,7 +9,7 @@ import Database from 'better-sqlite3';
 /**
  * Current schema version
  */
-export const CURRENT_SCHEMA_VERSION = 1;
+export const CURRENT_SCHEMA_VERSION = 2;
 
 /**
  * Migration definition
@@ -27,17 +27,24 @@ interface Migration {
  * Future migrations go here.
  */
 const migrations: Migration[] = [
-  // Example migration for version 2 (when needed):
-  // {
-  //   version: 2,
-  //   description: 'Add support for module resolution',
-  //   up: (db) => {
-  //     db.exec(`
-  //       ALTER TABLE nodes ADD COLUMN module_path TEXT;
-  //       CREATE INDEX idx_nodes_module_path ON nodes(module_path);
-  //     `);
-  //   },
-  // },
+  {
+    version: 2,
+    description: 'Add project metadata, provenance tracking, and unresolved ref context',
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS project_metadata (
+          key TEXT PRIMARY KEY,
+          value TEXT NOT NULL,
+          updated_at INTEGER NOT NULL
+        );
+        ALTER TABLE unresolved_refs ADD COLUMN file_path TEXT NOT NULL DEFAULT '';
+        ALTER TABLE unresolved_refs ADD COLUMN language TEXT NOT NULL DEFAULT 'unknown';
+        ALTER TABLE edges ADD COLUMN provenance TEXT DEFAULT NULL;
+        CREATE INDEX IF NOT EXISTS idx_unresolved_file_path ON unresolved_refs(file_path);
+        CREATE INDEX IF NOT EXISTS idx_edges_provenance ON edges(provenance);
+      `);
+    },
+  },
 ];
 
 /**
