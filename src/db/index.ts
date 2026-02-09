@@ -38,11 +38,23 @@ export class DatabaseConnection {
     // Enable foreign keys and WAL mode for better performance
     db.pragma('foreign_keys = ON');
     db.pragma('journal_mode = WAL');
+    db.pragma('synchronous = NORMAL');
+    db.pragma('cache_size = -64000');
+    db.pragma('mmap_size = 268435456');
+    db.pragma('temp_store = MEMORY');
 
     // Run schema initialization
     const schemaPath = path.join(__dirname, 'schema.sql');
     const schema = fs.readFileSync(schemaPath, 'utf-8');
     db.exec(schema);
+
+    // Record current schema version so migrations aren't re-applied on open
+    const currentVersion = getCurrentVersion(db);
+    if (currentVersion < CURRENT_SCHEMA_VERSION) {
+      db.prepare(
+        'INSERT OR IGNORE INTO schema_versions (version, applied_at, description) VALUES (?, ?, ?)'
+      ).run(CURRENT_SCHEMA_VERSION, Date.now(), 'Initial schema includes all migrations');
+    }
 
     return new DatabaseConnection(db, dbPath);
   }
@@ -60,6 +72,10 @@ export class DatabaseConnection {
     // Enable foreign keys and WAL mode
     db.pragma('foreign_keys = ON');
     db.pragma('journal_mode = WAL');
+    db.pragma('synchronous = NORMAL');
+    db.pragma('cache_size = -64000');
+    db.pragma('mmap_size = 268435456');
+    db.pragma('temp_store = MEMORY');
 
     // Check and run migrations if needed
     const conn = new DatabaseConnection(db, dbPath);
