@@ -1,65 +1,77 @@
 /**
  * Grammar Loading and Caching
  *
- * Manages tree-sitter language grammars.
+ * Manages tree-sitter language grammars with lazy loading.
  */
 
 import Parser from 'tree-sitter';
 import { Language } from '../types';
 
-// Grammar module imports
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-const TypeScript = require('tree-sitter-typescript').typescript;
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-const TSX = require('tree-sitter-typescript').tsx;
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-const JavaScript = require('tree-sitter-javascript');
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-const Python = require('tree-sitter-python');
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-const Go = require('tree-sitter-go');
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-const Rust = require('tree-sitter-rust');
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-const Java = require('tree-sitter-java');
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-const C = require('tree-sitter-c');
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-const Cpp = require('tree-sitter-cpp');
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-const CSharp = require('tree-sitter-c-sharp');
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-const PHP = require('tree-sitter-php').php;
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-const Ruby = require('tree-sitter-ruby');
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-const Swift = require('tree-sitter-swift');
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-const Kotlin = require('tree-sitter-kotlin');
-// Note: tree-sitter-liquid has ABI compatibility issues with tree-sitter 0.22+
-// Liquid extraction is handled separately via regex in tree-sitter.ts
+/* eslint-disable @typescript-eslint/no-require-imports */
 
 /**
- * Mapping of Language to tree-sitter grammar
+ * Lazy loader functions for each grammar
  */
-const GRAMMAR_MAP: Record<string, unknown> = {
-  typescript: TypeScript,
-  tsx: TSX,
-  javascript: JavaScript,
-  jsx: JavaScript, // JSX uses the JavaScript grammar
-  python: Python,
-  go: Go,
-  rust: Rust,
-  java: Java,
-  c: C,
-  cpp: Cpp,
-  csharp: CSharp,
-  php: PHP,
-  ruby: Ruby,
-  swift: Swift,
-  kotlin: Kotlin,
+const grammarLoaders: Record<string, () => unknown> = {
+  typescript: () => require('tree-sitter-typescript').typescript,
+  tsx: () => require('tree-sitter-typescript').tsx,
+  javascript: () => require('tree-sitter-javascript'),
+  jsx: () => require('tree-sitter-javascript'), // JSX uses the JavaScript grammar
+  python: () => require('tree-sitter-python'),
+  go: () => require('tree-sitter-go'),
+  rust: () => require('tree-sitter-rust'),
+  java: () => require('tree-sitter-java'),
+  c: () => require('tree-sitter-c'),
+  cpp: () => require('tree-sitter-cpp'),
+  csharp: () => require('tree-sitter-c-sharp'),
+  php: () => require('tree-sitter-php').php,
+  ruby: () => require('tree-sitter-ruby'),
+  swift: () => require('tree-sitter-swift'),
+  kotlin: () => require('tree-sitter-kotlin'),
   // liquid: uses custom regex-based extraction, not tree-sitter
 };
+
+/**
+ * Cache for loaded grammars (including null for failed loads)
+ */
+const grammarCache = new Map<string, unknown | null>();
+
+/**
+ * Errors encountered during grammar loading
+ */
+const grammarErrors = new Map<string, Error>();
+
+/**
+ * Get a grammar by language, loading it lazily if needed
+ */
+export function getGrammar(language: string): unknown | null {
+  if (grammarCache.has(language)) {
+    return grammarCache.get(language) ?? null;
+  }
+
+  const loader = grammarLoaders[language];
+  if (!loader) {
+    return null;
+  }
+
+  try {
+    const grammar = loader();
+    grammarCache.set(language, grammar);
+    return grammar;
+  } catch (err) {
+    const error = err instanceof Error ? err : new Error(String(err));
+    grammarErrors.set(language, error);
+    grammarCache.set(language, null);
+    return null;
+  }
+}
+
+/**
+ * Get errors from failed grammar loads
+ */
+export function getUnavailableGrammarErrors(): Map<string, Error> {
+  return new Map(grammarErrors);
+}
 
 /**
  * File extension to Language mapping
@@ -107,8 +119,8 @@ export function getParser(language: Language): Parser | null {
     return parserCache.get(language)!;
   }
 
-  // Get grammar for language
-  const grammar = GRAMMAR_MAP[language];
+  // Get grammar for language (lazy load)
+  const grammar = getGrammar(language);
   if (!grammar) {
     return null;
   }
@@ -135,14 +147,14 @@ export function detectLanguage(filePath: string): Language {
 export function isLanguageSupported(language: Language): boolean {
   // Liquid uses custom regex-based extraction, not tree-sitter
   if (language === 'liquid') return true;
-  return language !== 'unknown' && language in GRAMMAR_MAP;
+  return language !== 'unknown' && language in grammarLoaders;
 }
 
 /**
  * Get all supported languages
  */
 export function getSupportedLanguages(): Language[] {
-  const languages = Object.keys(GRAMMAR_MAP) as Language[];
+  const languages = Object.keys(grammarLoaders) as Language[];
   // Add Liquid which uses custom extraction
   languages.push('liquid');
   return languages;
