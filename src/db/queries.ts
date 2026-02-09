@@ -18,6 +18,7 @@ import {
   SearchResult,
 } from '../types';
 import { logWarn } from '../errors';
+import { kindBonus, scorePathRelevance } from '../search/query-utils';
 
 /**
  * Database row types (snake_case from SQLite)
@@ -53,6 +54,7 @@ interface EdgeRow {
   metadata: string | null;
   line: number | null;
   col: number | null;
+  provenance: string | null;
 }
 
 interface FileRow {
@@ -74,6 +76,8 @@ interface UnresolvedRefRow {
   line: number;
   col: number;
   candidates: string | null;
+  file_path: string;
+  language: string;
 }
 
 /**
@@ -132,6 +136,7 @@ function rowToEdge(row: EdgeRow): Edge {
     metadata: safeJsonParse(row.metadata, `edge ${row.source}->${row.target} metadata`),
     line: row.line ?? undefined,
     column: row.col ?? undefined,
+    provenance: row.provenance as Edge['provenance'],
   };
 }
 
@@ -426,6 +431,15 @@ export class QueryBuilder {
       results = this.searchNodesLike(query, { kinds, languages, limit, offset });
     }
 
+    // Apply multi-signal scoring
+    if (results.length > 0 && query) {
+      results = results.map(r => ({
+        ...r,
+        score: r.score + kindBonus(r.node.kind) + scorePathRelevance(r.node.filePath, query),
+      }));
+      results.sort((a, b) => b.score - a.score);
+    }
+
     return results;
   }
 
@@ -554,8 +568,8 @@ export class QueryBuilder {
   insertEdge(edge: Edge): void {
     if (!this.stmts.insertEdge) {
       this.stmts.insertEdge = this.db.prepare(`
-        INSERT INTO edges (source, target, kind, metadata, line, col)
-        VALUES (@source, @target, @kind, @metadata, @line, @col)
+        INSERT INTO edges (source, target, kind, metadata, line, col, provenance)
+        VALUES (@source, @target, @kind, @metadata, @line, @col, @provenance)
       `);
     }
 
@@ -566,6 +580,7 @@ export class QueryBuilder {
       metadata: edge.metadata ? JSON.stringify(edge.metadata) : null,
       line: edge.line ?? null,
       col: edge.column ?? null,
+      provenance: edge.provenance ?? null,
     });
   }
 
@@ -715,8 +730,8 @@ export class QueryBuilder {
   insertUnresolvedRef(ref: UnresolvedReference): void {
     if (!this.stmts.insertUnresolved) {
       this.stmts.insertUnresolved = this.db.prepare(`
-        INSERT INTO unresolved_refs (from_node_id, reference_name, reference_kind, line, col, candidates)
-        VALUES (@fromNodeId, @referenceName, @referenceKind, @line, @col, @candidates)
+        INSERT INTO unresolved_refs (from_node_id, reference_name, reference_kind, line, col, candidates, file_path, language)
+        VALUES (@fromNodeId, @referenceName, @referenceKind, @line, @col, @candidates, @filePath, @language)
       `);
     }
 
@@ -727,7 +742,22 @@ export class QueryBuilder {
       line: ref.line,
       col: ref.column,
       candidates: ref.candidates ? JSON.stringify(ref.candidates) : null,
+      filePath: ref.filePath ?? '',
+      language: ref.language ?? 'unknown',
     });
+  }
+
+  /**
+   * Insert multiple unresolved references in a transaction
+   */
+  insertUnresolvedRefsBatch(refs: UnresolvedReference[]): void {
+    if (refs.length === 0) return;
+    const insert = this.db.transaction(() => {
+      for (const ref of refs) {
+        this.insertUnresolvedRef(ref);
+      }
+    });
+    insert();
   }
 
   /**
@@ -759,6 +789,8 @@ export class QueryBuilder {
       line: row.line,
       column: row.col,
       candidates: safeJsonParse(row.candidates, 'unresolved_refs.candidates'),
+      filePath: row.file_path,
+      language: row.language as Language,
     }));
   }
 
@@ -774,6 +806,8 @@ export class QueryBuilder {
       line: row.line,
       column: row.col,
       candidates: safeJsonParse(row.candidates, 'unresolved_refs.candidates'),
+      filePath: row.file_path,
+      language: row.language as Language,
     }));
   }
 
@@ -796,6 +830,14 @@ export class QueryBuilder {
   // ===========================================================================
   // Statistics
   // ===========================================================================
+
+  /**
+   * Get all nodes
+   */
+  getAllNodes(): Node[] {
+    const rows = this.db.prepare('SELECT * FROM nodes').all() as NodeRow[];
+    return rows.map(rowToNode);
+  }
 
   /**
    * Get graph statistics
@@ -847,6 +889,39 @@ export class QueryBuilder {
       dbSizeBytes: 0, // Set by caller using DatabaseConnection.getSize()
       lastUpdated: Date.now(),
     };
+  }
+
+  // ===========================================================================
+  // Project Metadata
+  // ===========================================================================
+
+  /**
+   * Get a metadata value by key
+   */
+  getMetadata(key: string): string | null {
+    const row = this.db.prepare('SELECT value FROM project_metadata WHERE key = ?').get(key) as { value: string } | undefined;
+    return row?.value ?? null;
+  }
+
+  /**
+   * Set a metadata key-value pair (upsert)
+   */
+  setMetadata(key: string, value: string): void {
+    this.db.prepare(
+      'INSERT INTO project_metadata (key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at'
+    ).run(key, value, Date.now());
+  }
+
+  /**
+   * Get all metadata as a key-value record
+   */
+  getAllMetadata(): Record<string, string> {
+    const rows = this.db.prepare('SELECT key, value FROM project_metadata').all() as { key: string; value: string }[];
+    const result: Record<string, string> = {};
+    for (const row of rows) {
+      result[row.key] = row.value;
+    }
+    return result;
   }
 
   /**
