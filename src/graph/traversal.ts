@@ -23,6 +23,46 @@ const DEFAULT_OPTIONS: Required<TraversalOptions> = {
 const FIND_PATH_MAX_VISITED = 10000;
 
 /**
+ * Edge kind priority for evidence-based sorting
+ */
+const EDGE_KIND_PRIORITY: Record<string, number> = {
+  calls: 40,
+  imports: 35,
+  extends: 30,
+  implements: 30,
+  contains: 20,
+  references: 10,
+  type_of: 15,
+  returns: 12,
+  instantiates: 25,
+  overrides: 28,
+  decorates: 8,
+  exports: 5,
+};
+
+/**
+ * Calculate evidence score for an edge
+ */
+function edgeEvidenceScore(edge: Edge): number {
+  let score = EDGE_KIND_PRIORITY[edge.kind] ?? 5;
+
+  // SCIP provenance bonus (highest confidence)
+  if (edge.provenance === 'scip') score += 50;
+
+  // Line presence bonus (more specific)
+  if (edge.line !== undefined) score += 5;
+
+  return score;
+}
+
+/**
+ * Sort edges by evidence score (descending)
+ */
+export function sortEdgesByEvidence(edges: Edge[]): Edge[] {
+  return [...edges].sort((a, b) => edgeEvidenceScore(b) - edgeEvidenceScore(a));
+}
+
+/**
  * Result of a single traversal step
  */
 interface TraversalStep {
@@ -207,16 +247,17 @@ export class GraphTraverser {
   ): Edge[] {
     const kinds = edgeKinds && edgeKinds.length > 0 ? edgeKinds : undefined;
 
+    let edges: Edge[];
     if (direction === 'outgoing') {
-      return this.queries.getOutgoingEdges(nodeId, kinds);
+      edges = this.queries.getOutgoingEdges(nodeId, kinds);
     } else if (direction === 'incoming') {
-      return this.queries.getIncomingEdges(nodeId, kinds);
+      edges = this.queries.getIncomingEdges(nodeId, kinds);
     } else {
-      // Both directions
       const outgoing = this.queries.getOutgoingEdges(nodeId, kinds);
       const incoming = this.queries.getIncomingEdges(nodeId, kinds);
-      return [...outgoing, ...incoming];
+      edges = [...outgoing, ...incoming];
     }
+    return sortEdgesByEvidence(edges);
   }
 
   /**
@@ -332,7 +373,7 @@ export class GraphTraverser {
 
     return {
       nodes,
-      edges,
+      edges: sortEdgesByEvidence(edges),
       roots: [nodeId],
     };
   }
@@ -351,16 +392,17 @@ export class GraphTraverser {
 
     const nodes = new Map<string, Node>();
     const edges: Edge[] = [];
-    const visited = new Set<string>();
+    const visitedAncestors = new Set<string>();
+    const visitedDescendants = new Set<string>();
 
     // Add focal node
     nodes.set(focalNode.id, focalNode);
 
     // Get ancestors (what this extends/implements)
-    this.getTypeAncestors(nodeId, nodes, edges, visited);
+    this.getTypeAncestors(nodeId, nodes, edges, visitedAncestors);
 
     // Get descendants (what extends/implements this)
-    this.getTypeDescendants(nodeId, nodes, edges, visited);
+    this.getTypeDescendants(nodeId, nodes, edges, visitedDescendants);
 
     return {
       nodes,
