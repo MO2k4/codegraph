@@ -90,41 +90,64 @@ export class GitHooksManager {
    */
   private resolveGitDir(projectRoot: string): string {
     const gitPath = path.join(projectRoot, '.git');
-    
+
     if (!fs.existsSync(gitPath)) {
       return gitPath; // Will fail isGitRepository check
     }
-    
-    const stats = fs.statSync(gitPath);
-    
+
+    const stats = fs.lstatSync(gitPath);
+
+    // If .git is a symlink, resolve it but verify it stays reasonable
+    if (stats.isSymbolicLink()) {
+      try {
+        const realGit = fs.realpathSync(gitPath);
+        if (fs.statSync(realGit).isDirectory()) {
+          return realGit;
+        }
+      } catch {
+        return gitPath;
+      }
+    }
+
     // Regular git repository
     if (stats.isDirectory()) {
       return gitPath;
     }
-    
+
     // Git worktree - .git is a file containing "gitdir: <path>"
     if (stats.isFile()) {
       try {
         const content = fs.readFileSync(gitPath, 'utf-8').trim();
         const match = content.match(/^gitdir:\s*(.+)$/);
-        
+
         if (match && match[1]) {
           const worktreeGitDir = match[1];
           // Worktree path may be relative or absolute
           const absoluteWorktreeGitDir = path.isAbsolute(worktreeGitDir)
             ? worktreeGitDir
             : path.resolve(projectRoot, worktreeGitDir);
-          
+
           // For worktrees, hooks are in the main repo's .git/hooks
           // Navigate up from worktrees/<name> to the main .git directory
           const mainGitDir = path.dirname(path.dirname(absoluteWorktreeGitDir));
-          return mainGitDir;
+
+          // Validate the resolved git dir is a real directory and
+          // contains expected git structure (HEAD file) to prevent
+          // writing hooks to arbitrary directories
+          if (fs.existsSync(mainGitDir) && fs.statSync(mainGitDir).isDirectory()) {
+            const headFile = path.join(mainGitDir, 'HEAD');
+            if (fs.existsSync(headFile)) {
+              return mainGitDir;
+            }
+          }
+
+          // If validation fails, fall through to use local .git path
         }
       } catch {
         // If we can't read/parse, fall through to return gitPath
       }
     }
-    
+
     return gitPath;
   }
 

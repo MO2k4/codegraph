@@ -4,8 +4,10 @@
  * Defines the tools exposed by the CodeGraph MCP server.
  */
 
+import * as path from 'path';
 import CodeGraph from '../index';
 import type { Node, SearchResult, Subgraph, TaskContext, NodeKind } from '../types';
+import { validateProjectPath } from '../utils';
 
 const VALID_NODE_KINDS: ReadonlySet<string> = new Set<NodeKind>([
   'file', 'module', 'class', 'struct', 'interface', 'trait', 'protocol',
@@ -287,7 +289,9 @@ export class ToolHandler {
     try {
       return await handler(args);
     } catch (err) {
-      return this.errorResult(`Tool execution failed: ${err instanceof Error ? err.message : String(err)}`);
+      // Sanitize error message to avoid leaking internal paths
+      const message = err instanceof Error ? err.message : String(err);
+      return this.errorResult(`Tool execution failed: ${message.replace(/\/[^\s:]+/g, '<path>')}`);
     }
   }
 
@@ -538,9 +542,18 @@ export class ToolHandler {
     const rootPath = this.validateString(args.path, 'path');
     if (typeof rootPath !== 'string') return rootPath;
 
+    // Resolve to absolute path
+    const resolved = path.resolve(rootPath);
+
+    // Validate the path is a safe project directory
+    const validationError = validateProjectPath(resolved);
+    if (validationError) {
+      return this.errorResult(validationError);
+    }
+
     if (this.onSetRoot) {
-      this.onSetRoot(rootPath);
-      return this.textResult(`Project root set to: ${rootPath}`);
+      this.onSetRoot(resolved);
+      return this.textResult(`Project root set to: ${resolved}`);
     }
 
     return this.errorResult('set_root is not supported in this context');

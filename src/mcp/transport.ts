@@ -60,6 +60,12 @@ export type MessageHandler = (message: JsonRpcRequest | JsonRpcNotification) => 
  *
  * Reads JSON-RPC messages from stdin and writes responses to stdout.
  */
+/**
+ * Maximum size of a single JSON-RPC message (1MB).
+ * Prevents resource exhaustion from oversized requests.
+ */
+const MAX_MESSAGE_SIZE = 1024 * 1024;
+
 export class StdioTransport {
   private rl: readline.Interface | null = null;
   private messageHandler: MessageHandler | null = null;
@@ -144,6 +150,12 @@ export class StdioTransport {
     const trimmed = line.trim();
     if (!trimmed) return;
 
+    // Reject oversized messages to prevent resource exhaustion
+    if (trimmed.length > MAX_MESSAGE_SIZE) {
+      this.sendError(null, ErrorCodes.InvalidRequest, 'Message exceeds maximum size limit');
+      return;
+    }
+
     let parsed: unknown;
     try {
       parsed = JSON.parse(trimmed);
@@ -164,10 +176,12 @@ export class StdioTransport {
       } catch (err) {
         const message = parsed as JsonRpcRequest;
         if ('id' in message) {
+          // Sanitize error to avoid leaking internal paths
+          const errMsg = err instanceof Error ? err.message : String(err);
           this.sendError(
             message.id,
             ErrorCodes.InternalError,
-            `Internal error: ${err instanceof Error ? err.message : String(err)}`
+            `Internal error: ${errMsg.replace(/\/[^\s:]+/g, '<path>')}`
           );
         }
       }

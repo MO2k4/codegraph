@@ -51,8 +51,13 @@ export class ScipImporter {
       ? filePath
       : path.join(this.projectRoot, filePath);
 
+    // Ensure the SCIP file is within the project root to prevent arbitrary file reads
+    if (!isPathWithinRoot(fullPath, this.projectRoot)) {
+      throw new Error('SCIP file path is outside the project root');
+    }
+
     if (!fs.existsSync(fullPath)) {
-      throw new Error(`SCIP file not found: ${fullPath}`);
+      throw new Error('SCIP file not found');
     }
 
     const content = fs.readFileSync(fullPath, 'utf-8');
@@ -110,6 +115,8 @@ export class ScipImporter {
     const fullPath = path.isAbsolute(scipFilePath)
       ? scipFilePath
       : path.join(this.projectRoot, scipFilePath);
+
+    // Path validation already performed by parseSCIPFile above
     const contentHash = crypto
       .createHash('sha256')
       .update(fs.readFileSync(fullPath))

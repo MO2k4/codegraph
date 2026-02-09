@@ -291,6 +291,7 @@ describe('Sync Module', () => {
       // Set up main repo .git directory with worktrees
       const mainGitDir = path.join(mainRepoDir, '.git');
       fs.mkdirSync(mainGitDir);
+      fs.writeFileSync(path.join(mainGitDir, 'HEAD'), 'ref: refs/heads/main\n');
       fs.mkdirSync(path.join(mainGitDir, 'hooks'));
       fs.mkdirSync(path.join(mainGitDir, 'worktrees'), { recursive: true });
       fs.mkdirSync(path.join(mainGitDir, 'worktrees', 'feature-branch'));
@@ -314,6 +315,7 @@ describe('Sync Module', () => {
       // This simulates: mainRepo/.git/worktrees/feature-branch and worktree at mainRepo/worktrees/feature-branch
       const mainGitDir = path.join(mainRepoDir, '.git');
       fs.mkdirSync(mainGitDir);
+      fs.writeFileSync(path.join(mainGitDir, 'HEAD'), 'ref: refs/heads/main\n');
       fs.mkdirSync(path.join(mainGitDir, 'hooks'));
       fs.mkdirSync(path.join(mainGitDir, 'worktrees', 'feature-branch'), { recursive: true });
 
@@ -361,6 +363,7 @@ describe('Sync Module', () => {
       // Set up main repo
       const mainGitDir = path.join(mainRepoDir, '.git');
       fs.mkdirSync(mainGitDir);
+      fs.writeFileSync(path.join(mainGitDir, 'HEAD'), 'ref: refs/heads/main\n');
       fs.mkdirSync(path.join(mainGitDir, 'worktrees', 'feature-branch'), { recursive: true });
 
       // Create worktree .git file

@@ -22,6 +22,31 @@ export function getConfigPath(projectRoot: string): string {
 }
 
 /**
+ * Check if a regex pattern is safe from ReDoS attacks.
+ *
+ * Rejects patterns with nested quantifiers (e.g., (a+)+, (a*)*) which
+ * are the primary source of catastrophic backtracking. Also rejects
+ * excessively long patterns and validates compilability.
+ */
+function isSafeRegex(pattern: string): boolean {
+  // Reject excessively long patterns
+  if (pattern.length > 500) return false;
+
+  // Reject nested quantifiers: (...)+ followed by +, *, or {
+  // These are the primary cause of catastrophic backtracking
+  if (/([+*}])\s*[+*{]/.test(pattern)) return false;
+  if (/\([^)]*[+*][^)]*\)[+*{]/.test(pattern)) return false;
+
+  // Verify the pattern is a valid regex
+  try {
+    new RegExp(pattern);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Validate a configuration object
  */
 export function validateConfig(config: unknown): config is CodeGraphConfig {
@@ -75,6 +100,9 @@ export function validateConfig(config: unknown): config is CodeGraphConfig {
       if (typeof p.name !== 'string') return false;
       if (typeof p.pattern !== 'string') return false;
       if (typeof p.kind !== 'string') return false;
+
+      // Validate regex is compilable and reject patterns with known ReDoS risks
+      if (!isSafeRegex(p.pattern)) return false;
     }
   }
 

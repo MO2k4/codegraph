@@ -20,6 +20,7 @@ import * as path from 'path';
 import CodeGraph from '../index';
 import { StdioTransport, JsonRpcRequest, JsonRpcNotification, ErrorCodes } from './transport';
 import { tools, ToolHandler } from './tools';
+import { validateProjectPath } from '../utils';
 
 /**
  * MCP Server Info
@@ -178,6 +179,20 @@ export class MCPServer {
     // Fall back to current working directory if no path provided
     if (!projectPath) {
       projectPath = process.cwd();
+    }
+
+    // Validate the project path is safe before initializing
+    const validationError = validateProjectPath(projectPath);
+    if (validationError) {
+      this.initError = validationError;
+      this.transport.sendResult(request.id, {
+        protocolVersion: PROTOCOL_VERSION,
+        capabilities: {
+          tools: {},
+        },
+        serverInfo: SERVER_INFO,
+      });
+      return;
     }
 
     // Initialize CodeGraph if we have a project path

@@ -70,6 +70,20 @@ export function removeDirectory(projectRoot: string): void {
     return;
   }
 
+  // Verify .codegraph is a real directory, not a symlink pointing elsewhere
+  const lstat = fs.lstatSync(codegraphDir);
+  if (lstat.isSymbolicLink()) {
+    // Only remove the symlink itself, never follow it for recursive delete
+    fs.unlinkSync(codegraphDir);
+    return;
+  }
+
+  if (!lstat.isDirectory()) {
+    // Not a directory - remove the single file
+    fs.unlinkSync(codegraphDir);
+    return;
+  }
+
   // Recursively remove directory
   fs.rmSync(codegraphDir, { recursive: true, force: true });
 }
@@ -91,6 +105,11 @@ export function listDirectoryContents(projectRoot: string): string[] {
 
     for (const entry of entries) {
       const relativePath = prefix ? `${prefix}/${entry.name}` : entry.name;
+
+      // Skip symlinks to prevent following links outside .codegraph
+      if (entry.isSymbolicLink()) {
+        continue;
+      }
 
       if (entry.isDirectory()) {
         walkDir(path.join(dir, entry.name), relativePath);
@@ -120,6 +139,11 @@ export function getDirectorySize(projectRoot: string): number {
     const entries = fs.readdirSync(dir, { withFileTypes: true });
 
     for (const entry of entries) {
+      // Skip symlinks to prevent following links outside .codegraph
+      if (entry.isSymbolicLink()) {
+        continue;
+      }
+
       const fullPath = path.join(dir, entry.name);
 
       if (entry.isDirectory()) {

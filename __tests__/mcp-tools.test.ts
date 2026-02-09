@@ -340,20 +340,21 @@ export function checkAuth(token: string): boolean {
     });
 
     it('should return error when no onSetRoot callback', async () => {
-      const result = await handler.execute('codegraph_set_root', { path: '/tmp/test' });
+      const result = await handler.execute('codegraph_set_root', { path: testDir });
       expect(result.isError).toBe(true);
       expect(result.content[0]?.text).toContain('not supported');
     });
 
     it('should call onSetRoot callback when provided', async () => {
+      // Use the actual test directory (which exists) to pass path validation
       let capturedPath = '';
       const handlerWithCallback = new ToolHandler(cg, {
         onSetRoot: (p) => { capturedPath = p; },
       });
 
-      const result = await handlerWithCallback.execute('codegraph_set_root', { path: '/tmp/new-root' });
+      const result = await handlerWithCallback.execute('codegraph_set_root', { path: testDir });
       expect(result.isError).toBeUndefined();
-      expect(capturedPath).toBe('/tmp/new-root');
+      expect(capturedPath).toBe(testDir);
     });
   });
 

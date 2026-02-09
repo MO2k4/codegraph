@@ -275,10 +275,15 @@ export class ExtractionOrchestrator {
 
       const batch = files.slice(i, i + FILE_IO_BATCH_SIZE);
 
-      // Read files in parallel
+      // Read files in parallel (with path validation before any I/O)
       const fileContents = await Promise.all(
         batch.map(async (fp) => {
           try {
+            // Validate path before reading to prevent traversal
+            if (!isPathWithinRoot(fp, this.rootDir)) {
+              logWarn('Path traversal blocked in batch reader', { filePath: fp });
+              return { filePath: fp, content: null as string | null, stats: null as fs.Stats | null, error: new Error('Path traversal blocked') };
+            }
             const fullPath = path.join(this.rootDir, fp);
             const content = await fs.promises.readFile(fullPath, 'utf-8');
             const stats = await fs.promises.stat(fullPath);

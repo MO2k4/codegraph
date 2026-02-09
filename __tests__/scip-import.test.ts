@@ -90,7 +90,11 @@ describe('SCIP Import', () => {
       const cg = CodeGraph.initSync(testDir);
       const importer = new ScipImporter(testDir, (cg as any).queries);
 
-      expect(() => importer.parseSCIPFile('/nonexistent/path.scip.json')).toThrow('SCIP file not found');
+      // Absolute path outside project root is rejected as path traversal
+      expect(() => importer.parseSCIPFile('/nonexistent/path.scip.json')).toThrow('outside the project root');
+
+      // Relative path within project root that doesn't exist
+      expect(() => importer.parseSCIPFile('nonexistent.scip.json')).toThrow('SCIP file not found');
 
       cg.close();
     });
