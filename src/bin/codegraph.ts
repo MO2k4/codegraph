@@ -23,6 +23,8 @@ import * as fs from 'fs';
 import CodeGraph from '../index';
 import type { IndexProgress } from '../index';
 import { runInstaller } from '../installer';
+import { getRuntimeVersion } from '../version';
+import { getUnavailableGrammarErrors } from '../extraction/grammars';
 
 // Check if running with no arguments - run installer
 if (process.argv.length === 2) {
@@ -169,6 +171,36 @@ function info(message: string): void {
  */
 function warn(message: string): void {
   console.log(chalk.yellow('⚠') + ' ' + message);
+}
+
+/**
+ * Display index statistics (shared between status and post-index summary)
+ */
+function displayIndexStats(stats: ReturnType<CodeGraph['getStats']>): void {
+  console.log(chalk.bold('Index Statistics:'));
+  console.log(`  Files:     ${formatNumber(stats.fileCount)}`);
+  console.log(`  Nodes:     ${formatNumber(stats.nodeCount)}`);
+  console.log(`  Edges:     ${formatNumber(stats.edgeCount)}`);
+  console.log(`  DB Size:   ${(stats.dbSizeBytes / 1024 / 1024).toFixed(2)} MB`);
+  console.log();
+
+  console.log(chalk.bold('Nodes by Kind:'));
+  const nodesByKind = Object.entries(stats.nodesByKind)
+    .filter(([, count]) => count > 0)
+    .sort((a, b) => b[1] - a[1]);
+  for (const [kind, count] of nodesByKind) {
+    console.log(`  ${kind.padEnd(15)} ${formatNumber(count)}`);
+  }
+  console.log();
+
+  console.log(chalk.bold('Files by Language:'));
+  const filesByLang = Object.entries(stats.filesByLanguage)
+    .filter(([, count]) => count > 0)
+    .sort((a, b) => b[1] - a[1]);
+  for (const [lang, count] of filesByLang) {
+    console.log(`  ${lang.padEnd(15)} ${formatNumber(count)}`);
+  }
+  console.log();
 }
 
 // =============================================================================
@@ -406,39 +438,42 @@ program
       const stats = cg.getStats();
       const changes = cg.getChangedFiles();
 
+      const version = getRuntimeVersion();
+
       console.log(chalk.bold('\nCodeGraph Status\n'));
 
       // Project info
       console.log(chalk.cyan('Project:'), projectPath);
+      console.log(chalk.cyan('Version:'), version.package + (version.git ? ` (${version.git})` : ''));
       console.log();
 
-      // Index stats
-      console.log(chalk.bold('Index Statistics:'));
-      console.log(`  Files:     ${formatNumber(stats.fileCount)}`);
-      console.log(`  Nodes:     ${formatNumber(stats.nodeCount)}`);
-      console.log(`  Edges:     ${formatNumber(stats.edgeCount)}`);
-      console.log(`  DB Size:   ${(stats.dbSizeBytes / 1024 / 1024).toFixed(2)} MB`);
-      console.log();
+      // Use shared helper for index stats
+      displayIndexStats(stats);
 
-      // Node breakdown
-      console.log(chalk.bold('Nodes by Kind:'));
-      const nodesByKind = Object.entries(stats.nodesByKind)
-        .filter(([, count]) => count > 0)
-        .sort((a, b) => b[1] - a[1]);
-      for (const [kind, count] of nodesByKind) {
-        console.log(`  ${kind.padEnd(15)} ${formatNumber(count)}`);
+      // Provenance metadata
+      const metadata = cg.getMetadata();
+      if (metadata) {
+        const lastIndexed = metadata['last_indexed_at'];
+        const firstIndexed = metadata['first_indexed_at'];
+        const scipEdges = metadata['scip_edges_created'];
+        if (lastIndexed || firstIndexed) {
+          console.log(chalk.bold('Provenance:'));
+          if (firstIndexed) console.log(`  First indexed: ${firstIndexed}`);
+          if (lastIndexed) console.log(`  Last indexed:  ${lastIndexed}`);
+          if (scipEdges) console.log(`  SCIP edges:    ${scipEdges}`);
+          console.log();
+        }
       }
-      console.log();
 
-      // Language breakdown
-      console.log(chalk.bold('Files by Language:'));
-      const filesByLang = Object.entries(stats.filesByLanguage)
-        .filter(([, count]) => count > 0)
-        .sort((a, b) => b[1] - a[1]);
-      for (const [lang, count] of filesByLang) {
-        console.log(`  ${lang.padEnd(15)} ${formatNumber(count)}`);
+      // Grammar availability
+      const grammarErrors = getUnavailableGrammarErrors();
+      if (grammarErrors.size > 0) {
+        console.log(chalk.bold('Grammar Issues:'));
+        for (const [lang, err] of grammarErrors) {
+          console.log(`  ${chalk.yellow(lang)}: ${err.message}`);
+        }
+        console.log();
       }
-      console.log();
 
       // Pending changes
       const totalChanges = changes.added.length + changes.modified.length + changes.removed.length;
@@ -721,6 +756,55 @@ hooksCommand
       process.exit(1);
     } finally {
       cg?.close();
+    }
+  });
+
+/**
+ * codegraph uninit [path]
+ */
+program
+  .command('uninit [path]')
+  .description('Remove CodeGraph from the project (deletes .codegraph directory)')
+  .option('-f, --force', 'Skip confirmation prompt')
+  .action(async (pathArg: string | undefined, options: { force?: boolean }) => {
+    const projectPath = resolveProjectPath(pathArg);
+
+    if (!CodeGraph.isInitialized(projectPath)) {
+      info(`CodeGraph is not initialized in ${projectPath}`);
+      return;
+    }
+
+    if (!options.force) {
+      // Confirmation prompt
+      const readline = await import('readline');
+      const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+      try {
+        const answer = await new Promise<string>((resolve) => {
+          rl.question(
+            chalk.yellow('This will permanently delete all CodeGraph data. Continue? (y/N) '),
+            resolve
+          );
+        });
+        rl.close();
+
+        if (answer.toLowerCase() !== 'y' && answer.toLowerCase() !== 'yes') {
+          info('Cancelled');
+          return;
+        }
+      } catch {
+        rl.close();
+        info('Cancelled');
+        return;
+      }
+    }
+
+    try {
+      const cg = await CodeGraph.open(projectPath);
+      cg.uninitialize();
+      success(`Removed CodeGraph from ${projectPath}`);
+    } catch (err) {
+      error(`Failed to uninitialize: ${err instanceof Error ? err.message : String(err)}`);
+      process.exit(1);
     }
   });
 
