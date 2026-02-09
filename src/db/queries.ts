@@ -191,8 +191,36 @@ export class QueryBuilder {
     getUnresolvedByName?: Database.Statement;
   } = {};
 
+  // Cache for dynamically-built prepared statements keyed by SQL shape.
+  // Avoids re-preparing the same SQL on every search call when the
+  // number of kind/language filters is the same across invocations.
+  private dynamicStmtCache = new Map<string, Database.Statement>();
+  private readonly maxDynamicStmtCacheSize = 50;
+
   constructor(db: Database.Database) {
     this.db = db;
+  }
+
+  /**
+   * Get or create a cached prepared statement for dynamically-built SQL.
+   * The cache key should uniquely identify the SQL shape (e.g. method name
+   * plus the counts of variable-length IN-clause parameters).
+   *
+   * If the cache exceeds maxDynamicStmtCacheSize, it is fully cleared to
+   * keep memory bounded (simple eviction strategy; the statements will be
+   * re-prepared on next use).
+   */
+  private getDynamicStmt(cacheKey: string, sql: string): Database.Statement {
+    let stmt = this.dynamicStmtCache.get(cacheKey);
+    if (stmt) return stmt;
+
+    if (this.dynamicStmtCache.size >= this.maxDynamicStmtCacheSize) {
+      this.dynamicStmtCache.clear();
+    }
+
+    stmt = this.db.prepare(sql);
+    this.dynamicStmtCache.set(cacheKey, stmt);
+    return stmt;
   }
 
   // ===========================================================================
@@ -382,10 +410,11 @@ export class QueryBuilder {
   }
 
   /**
-   * Clear the node cache
+   * Clear the node cache and dynamic statement cache
    */
   clearCache(): void {
     this.nodeCache.clear();
+    this.dynamicStmtCache.clear();
   }
 
   /**
@@ -520,28 +549,35 @@ export class QueryBuilder {
     `;
 
     const params: (string | number)[] = [ftsQuery];
+    const kindsLen = kinds?.length ?? 0;
+    const langsLen = languages?.length ?? 0;
 
-    if (kinds && kinds.length > 0) {
-      sql += ` AND nodes.kind IN (${kinds.map(() => '?').join(',')})`;
-      params.push(...kinds);
+    if (kindsLen > 0) {
+      sql += ` AND nodes.kind IN (${kinds!.map(() => '?').join(',')})`;
+      params.push(...kinds!);
     }
 
-    if (languages && languages.length > 0) {
-      sql += ` AND nodes.language IN (${languages.map(() => '?').join(',')})`;
-      params.push(...languages);
+    if (langsLen > 0) {
+      sql += ` AND nodes.language IN (${languages!.map(() => '?').join(',')})`;
+      params.push(...languages!);
     }
 
     sql += ' ORDER BY score LIMIT ? OFFSET ?';
     params.push(limit, offset);
 
+    // Cache the prepared statement by its SQL shape (kinds count + languages count)
+    const cacheKey = `fts:${kindsLen}:${langsLen}`;
+
     try {
-      const rows = this.db.prepare(sql).all(...params) as (NodeRow & { score: number })[];
+      const stmt = this.getDynamicStmt(cacheKey, sql);
+      const rows = stmt.all(...params) as (NodeRow & { score: number })[];
       return rows.map((row) => ({
         node: rowToNode(row),
         score: Math.abs(row.score), // bm25 returns negative scores
       }));
     } catch {
-      // FTS query failed, return empty
+      // FTS query failed (e.g. malformed ftsQuery), invalidate cached stmt and return empty
+      this.dynamicStmtCache.delete(cacheKey);
       return [];
     }
   }
@@ -585,20 +621,26 @@ export class QueryBuilder {
       startsWith,     // WHERE: name starts with
     ];
 
-    if (kinds && kinds.length > 0) {
-      sql += ` AND kind IN (${kinds.map(() => '?').join(',')})`;
-      params.push(...kinds);
+    const kindsLen = kinds?.length ?? 0;
+    const langsLen = languages?.length ?? 0;
+
+    if (kindsLen > 0) {
+      sql += ` AND kind IN (${kinds!.map(() => '?').join(',')})`;
+      params.push(...kinds!);
     }
 
-    if (languages && languages.length > 0) {
-      sql += ` AND language IN (${languages.map(() => '?').join(',')})`;
-      params.push(...languages);
+    if (langsLen > 0) {
+      sql += ` AND language IN (${languages!.map(() => '?').join(',')})`;
+      params.push(...languages!);
     }
 
     sql += ' ORDER BY score DESC, length(name) ASC LIMIT ? OFFSET ?';
     params.push(limit, offset);
 
-    const rows = this.db.prepare(sql).all(...params) as (NodeRow & { score: number })[];
+    // Cache the prepared statement by its SQL shape (kinds count + languages count)
+    const cacheKey = `like:${kindsLen}:${langsLen}`;
+    const stmt = this.getDynamicStmt(cacheKey, sql);
+    const rows = stmt.all(...params) as (NodeRow & { score: number })[];
 
     return rows.map((row) => ({
       node: rowToNode(row),

@@ -19,7 +19,7 @@ import { fileURLToPath } from 'url';
 import * as path from 'path';
 import CodeGraph from '../index';
 import { StdioTransport, JsonRpcRequest, JsonRpcNotification, ErrorCodes } from './transport';
-import { tools, ToolHandler } from './tools';
+import { tools, ToolHandler, ToolResult } from './tools';
 import { validateProjectPath } from '../utils';
 
 /**
@@ -36,6 +36,14 @@ const SERVER_INFO = {
 const PROTOCOL_VERSION = '2024-11-05';
 
 /**
+ * Cached MCP tool result with expiration timestamp
+ */
+interface CacheEntry {
+  result: ToolResult;
+  expiresAt: number;
+}
+
+/**
  * MCP Server for CodeGraph
  *
  * Implements the Model Context Protocol to expose CodeGraph
@@ -47,6 +55,10 @@ export class MCPServer {
   private toolHandler: ToolHandler | null = null;
   private projectPath: string | null;
   private initError: string | null = null;
+
+  /** Short-lived cache for tool call results to deduplicate rapid repeat requests */
+  private requestCache = new Map<string, CacheEntry>();
+  private static readonly CACHE_TTL_MS = 5000;
 
   constructor(projectPath?: string) {
     this.projectPath = projectPath || null;
@@ -217,6 +229,25 @@ export class MCPServer {
     });
   }
 
+  /** Tools that mutate state and must never be cached */
+  private static readonly UNCACHEABLE_TOOLS = new Set([
+    'codegraph_set_root', 'codegraph_init', 'codegraph_index',
+    'codegraph_sync', 'codegraph_uninit',
+  ]);
+
+  /**
+   * Evict expired entries from the request cache.
+   * Called periodically to prevent unbounded growth.
+   */
+  private pruneCache(): void {
+    const now = Date.now();
+    for (const [key, entry] of this.requestCache) {
+      if (now >= entry.expiresAt) {
+        this.requestCache.delete(key);
+      }
+    }
+  }
+
   /**
    * Handle tools/call request
    */
@@ -263,7 +294,35 @@ export class MCPServer {
       return;
     }
 
+    // Check request cache for read-only tools (short TTL dedup)
+    const cacheable = !MCPServer.UNCACHEABLE_TOOLS.has(toolName);
+    let cacheKey = '';
+
+    if (cacheable) {
+      cacheKey = toolName + ':' + JSON.stringify(toolArgs);
+      const cached = this.requestCache.get(cacheKey);
+      if (cached && Date.now() < cached.expiresAt) {
+        this.transport.sendResult(request.id, cached.result);
+        return;
+      }
+    }
+
     const result = await this.toolHandler.execute(toolName, toolArgs);
+
+    // Cache the result for read-only tools
+    if (cacheable) {
+      // Prune stale entries periodically (every 50 cached results)
+      if (this.requestCache.size > 50) {
+        this.pruneCache();
+      }
+      this.requestCache.set(cacheKey, {
+        result,
+        expiresAt: Date.now() + MCPServer.CACHE_TTL_MS,
+      });
+    } else {
+      // Mutating tool: invalidate entire cache since graph state changed
+      this.requestCache.clear();
+    }
 
     this.transport.sendResult(request.id, result);
   }
@@ -271,4 +330,4 @@ export class MCPServer {
 
 // Export for use in CLI
 export { StdioTransport } from './transport';
-export { tools, ToolHandler } from './tools';
+export { tools, ToolHandler, ToolResult } from './tools';

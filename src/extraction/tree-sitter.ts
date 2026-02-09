@@ -769,82 +769,140 @@ export class TreeSitterExtractor {
   }
 
   /**
-   * Visit a node and extract information
+   * Visit a node and extract information.
+   *
+   * Uses an iterative approach with an explicit work stack to avoid
+   * stack overflow on deeply nested files (1000+ nesting levels).
+   * Nodes are visited in DFS pre-order, matching the original recursive behavior.
    */
-  private visitNode(node: SyntaxNode): void {
+  private visitNode(startNode: SyntaxNode): void {
     if (!this.extractor) return;
 
-    const nodeType = node.type;
-    let skipChildren = false;
+    // Work items: either a node to visit, or a signal to pop the nodeStack.
+    type WorkItem =
+      | { kind: 'visit'; node: SyntaxNode }
+      | { kind: 'popStack' };
 
-    // Check for function declarations
-    // For Python/Ruby, function_definition inside a class should be treated as method
-    if (this.extractor.functionTypes.includes(nodeType)) {
-      if (this.isInsideClassLikeNode() && this.extractor.methodTypes.includes(nodeType)) {
-        // Inside a class - treat as method
+    const workStack: WorkItem[] = [{ kind: 'visit', node: startNode }];
+
+    while (workStack.length > 0) {
+      const item = workStack.pop()!;
+
+      if (item.kind === 'popStack') {
+        this.nodeStack.pop();
+        continue;
+      }
+
+      const node = item.node;
+      const nodeType = node.type;
+      let skipChildren = false;
+
+      // Check for function declarations
+      // For Python/Ruby, function_definition inside a class should be treated as method
+      if (this.extractor.functionTypes.includes(nodeType)) {
+        if (this.isInsideClassLikeNode() && this.extractor.methodTypes.includes(nodeType)) {
+          // Inside a class - treat as method
+          this.extractMethod(node);
+          skipChildren = true; // extractMethod visits children via visitFunctionBody
+        } else {
+          this.extractFunction(node);
+          skipChildren = true; // extractFunction visits children via visitFunctionBody
+        }
+      }
+      // Check for class declarations
+      else if (this.extractor.classTypes.includes(nodeType)) {
+        // Swift uses class_declaration for both classes and structs
+        // Check for 'struct' child to differentiate
+        if (this.language === 'swift' && this.hasChildOfType(node, 'struct')) {
+          const structNodeId = this.extractStructIterative(node);
+          if (structNodeId) {
+            // Schedule: pop nodeStack after children, then visit children in order
+            const body = getChildByField(node, this.extractor.bodyField) || node;
+            workStack.push({ kind: 'popStack' });
+            // Push children in reverse order so first child is processed first
+            for (let i = body.namedChildCount - 1; i >= 0; i--) {
+              const child = body.namedChild(i);
+              if (child) {
+                workStack.push({ kind: 'visit', node: child });
+              }
+            }
+          }
+        } else if (this.language === 'swift' && this.hasChildOfType(node, 'enum')) {
+          this.extractEnum(node);
+        } else {
+          const classNodeId = this.extractClassIterative(node);
+          if (classNodeId) {
+            // Schedule: pop nodeStack after children, then visit children in order
+            const body = getChildByField(node, this.extractor.bodyField) || node;
+            workStack.push({ kind: 'popStack' });
+            // Push children in reverse order so first child is processed first
+            for (let i = body.namedChildCount - 1; i >= 0; i--) {
+              const child = body.namedChild(i);
+              if (child) {
+                workStack.push({ kind: 'visit', node: child });
+              }
+            }
+          }
+        }
+        skipChildren = true; // class/struct/enum body children handled above
+      }
+      // Check for method declarations (only if not already handled by functionTypes)
+      else if (this.extractor.methodTypes.includes(nodeType)) {
         this.extractMethod(node);
         skipChildren = true; // extractMethod visits children via visitFunctionBody
-      } else {
-        this.extractFunction(node);
-        skipChildren = true; // extractFunction visits children via visitFunctionBody
       }
-    }
-    // Check for class declarations
-    else if (this.extractor.classTypes.includes(nodeType)) {
-      // Swift uses class_declaration for both classes and structs
-      // Check for 'struct' child to differentiate
-      if (this.language === 'swift' && this.hasChildOfType(node, 'struct')) {
-        this.extractStruct(node);
-      } else if (this.language === 'swift' && this.hasChildOfType(node, 'enum')) {
+      // Check for interface/protocol/trait declarations
+      else if (this.extractor.interfaceTypes.includes(nodeType)) {
+        this.extractInterface(node);
+        skipChildren = true; // extractInterface visits body children
+      }
+      // Check for struct declarations
+      else if (this.extractor.structTypes.includes(nodeType)) {
+        const structNodeId = this.extractStructIterative(node);
+        if (structNodeId) {
+          // Schedule: pop nodeStack after children, then visit children in order
+          const body = getChildByField(node, this.extractor.bodyField) || node;
+          workStack.push({ kind: 'popStack' });
+          // Push children in reverse order so first child is processed first
+          for (let i = body.namedChildCount - 1; i >= 0; i--) {
+            const child = body.namedChild(i);
+            if (child) {
+              workStack.push({ kind: 'visit', node: child });
+            }
+          }
+        }
+        skipChildren = true; // struct body children handled above
+      }
+      // Check for enum declarations
+      else if (this.extractor.enumTypes.includes(nodeType)) {
         this.extractEnum(node);
-      } else {
-        this.extractClass(node);
+        skipChildren = true; // extractEnum visits body children
       }
-      skipChildren = true; // extractClass visits body children
-    }
-    // Check for method declarations (only if not already handled by functionTypes)
-    else if (this.extractor.methodTypes.includes(nodeType)) {
-      this.extractMethod(node);
-      skipChildren = true; // extractMethod visits children via visitFunctionBody
-    }
-    // Check for interface/protocol/trait declarations
-    else if (this.extractor.interfaceTypes.includes(nodeType)) {
-      this.extractInterface(node);
-      skipChildren = true; // extractInterface visits body children
-    }
-    // Check for struct declarations
-    else if (this.extractor.structTypes.includes(nodeType)) {
-      this.extractStruct(node);
-      skipChildren = true; // extractStruct visits body children
-    }
-    // Check for enum declarations
-    else if (this.extractor.enumTypes.includes(nodeType)) {
-      this.extractEnum(node);
-      skipChildren = true; // extractEnum visits body children
-    }
-    // Check for arrow functions / function expressions assigned to variables (JS/TS)
-    else if (nodeType === 'variable_declarator') {
-      const valueNode = getChildByField(node, 'value');
-      if (valueNode && (valueNode.type === 'arrow_function' || valueNode.type === 'function')) {
-        this.extractFunctionVariable(node);
-        skipChildren = true;
+      // Check for arrow functions / function expressions assigned to variables (JS/TS)
+      else if (nodeType === 'variable_declarator') {
+        const valueNode = getChildByField(node, 'value');
+        if (valueNode && (valueNode.type === 'arrow_function' || valueNode.type === 'function')) {
+          this.extractFunctionVariable(node);
+          skipChildren = true;
+        }
       }
-    }
-    // Check for imports
-    else if (this.extractor.importTypes.includes(nodeType)) {
-      this.extractImport(node);
-    }
-    // Check for function calls
-    else if (this.extractor.callTypes.includes(nodeType)) {
-      this.extractCall(node);
-    }
+      // Check for imports
+      else if (this.extractor.importTypes.includes(nodeType)) {
+        this.extractImport(node);
+      }
+      // Check for function calls
+      else if (this.extractor.callTypes.includes(nodeType)) {
+        this.extractCall(node);
+      }
 
-    // Visit children (unless the extract method already visited them)
-    if (!skipChildren) {
-      for (let i = 0; i < node.namedChildCount; i++) {
-        const child = node.namedChild(i);
-        if (child) {
-          this.visitNode(child);
+      // Visit children (unless the extract method already visited them)
+      if (!skipChildren) {
+        // Push children in reverse order so first child is processed first (DFS pre-order)
+        for (let i = node.namedChildCount - 1; i >= 0; i--) {
+          const child = node.namedChild(i);
+          if (child) {
+            workStack.push({ kind: 'visit', node: child });
+          }
         }
       }
     }
@@ -1037,10 +1095,14 @@ export class TreeSitterExtractor {
   }
 
   /**
-   * Extract a class
+   * Extract a class (called from the iterative visitNode loop).
+   * Creates the class node and pushes it onto the nodeStack, but does NOT
+   * visit body children -- the caller is responsible for scheduling them
+   * and a corresponding nodeStack pop.
+   * Returns the class node ID, or null if extraction was skipped.
    */
-  private extractClass(node: SyntaxNode): void {
-    if (!this.extractor) return;
+  private extractClassIterative(node: SyntaxNode): string | null {
+    if (!this.extractor) return null;
 
     const name = extractName(node, this.source, this.extractor);
     const docstring = getPrecedingDocstring(node, this.source);
@@ -1056,18 +1118,10 @@ export class TreeSitterExtractor {
     // Extract extends/implements
     this.extractInheritance(node, classNode.id);
 
-    // Push to stack and visit body
+    // Push to stack -- the iterative loop will schedule children and the pop
     this.nodeStack.push(classNode.id);
-    const body = getChildByField(node, this.extractor.bodyField) || node;
 
-    // Visit all children for methods and properties
-    for (let i = 0; i < body.namedChildCount; i++) {
-      const child = body.namedChild(i);
-      if (child) {
-        this.visitNode(child);
-      }
-    }
-    this.nodeStack.pop();
+    return classNode.id;
   }
 
   /**
@@ -1129,10 +1183,14 @@ export class TreeSitterExtractor {
   }
 
   /**
-   * Extract a struct
+   * Extract a struct (called from the iterative visitNode loop).
+   * Creates the struct node and pushes it onto the nodeStack, but does NOT
+   * visit body children -- the caller is responsible for scheduling them
+   * and a corresponding nodeStack pop.
+   * Returns the struct node ID, or null if extraction was skipped.
    */
-  private extractStruct(node: SyntaxNode): void {
-    if (!this.extractor) return;
+  private extractStructIterative(node: SyntaxNode): string | null {
+    if (!this.extractor) return null;
 
     const name = extractName(node, this.source, this.extractor);
     const docstring = getPrecedingDocstring(node, this.source);
@@ -1145,16 +1203,10 @@ export class TreeSitterExtractor {
       isExported,
     });
 
-    // Push to stack for field extraction
+    // Push to stack -- the iterative loop will schedule children and the pop
     this.nodeStack.push(structNode.id);
-    const body = getChildByField(node, this.extractor.bodyField) || node;
-    for (let i = 0; i < body.namedChildCount; i++) {
-      const child = body.namedChild(i);
-      if (child) {
-        this.visitNode(child);
-      }
-    }
-    this.nodeStack.pop();
+
+    return structNode.id;
   }
 
   /**
